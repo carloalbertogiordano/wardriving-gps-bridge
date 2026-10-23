@@ -80,10 +80,17 @@ class HttpGpsServer(private val port: Int) {
                 return
             }
 
-            // Niente '\n' finale: il corpo e' esattamente "lat,lon,acc,ts",
-            // cosi' lo split(",") lato Bruce non deve gestire whitespace.
-            val body = "%.6f,%.6f,%.0f,%d"
-                .format(fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis)
+            // ageMillis calcolato qui, non su Bruce: l'orologio dell'ESP32
+            // e' millis() da boot, quello del telefono e' epoch reale, i
+            // due non sono confrontabili. Bruce legge solo ageMillis per
+            // decidere se un fix e' troppo vecchio - mai fix.ts, che resta
+            // solo un riferimento assoluto per il log.
+            val ageMillis = System.currentTimeMillis() - fix.timeMillis
+
+            // Niente '\n' finale: il corpo e' esattamente
+            // "lat,lon,acc,ts,age_ms", split(",") lato Bruce senza whitespace.
+            val body = "%.6f,%.6f,%.0f,%d,%d"
+                .format(fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis, ageMillis)
             writeResponse(out, 200, body)
         }
     }

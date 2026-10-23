@@ -40,6 +40,18 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
    path e' una stringa semplice) per non rifare il setup ai run
    successivi. `storage.write` di default fa *append*: va passato
    `"write"` esplicito o la config si accumula ad ogni esecuzione.
+4. **Eta' del fix calcolata dal telefono, non da Bruce** (M4). L'ESP32
+   non ha un orologio comparabile a quello del telefono: `now()` di
+   Bruce e' `millis()` da boot, il telefono manda un epoch reale. Il
+   protocollo porta un quinto campo, `age_ms`
+   (`System.currentTimeMillis() - orario del fix`, calcolato lato
+   telefono ad ogni risposta), e Bruce lo usa cosi' com'e' per decidere
+   se un fix e' troppo vecchio (`STALE_FIX_MS`) - non fa mai la
+   sottrazione da solo.
+5. **Log CSV su SD**, non LittleFS: `{fs:"sd", path:"/wardrive_log.csv"}`
+   nello stesso file, un giro di `wifi.scan()` -> N righe (una per rete
+   trovata), stesso fix per tutte. SSID con virgole: `split(",").join(";")`,
+   niente `replace()`/regex (non garantiti su questo motore).
 3. **Protocollo GPS tra i due device, bloccato dopo analisi del codice reale**:
    - `httpFetch()` di Bruce fa `http.setReuse(false)` (visto in `wifi_js.cpp`):
      niente keep-alive, mai, è hardcoded in C++. Costante fissa, non
@@ -65,8 +77,8 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
 | **M0** | App Kotlin minimale: bottone Start/Stop, foreground service, due fasi — Fused Location (Play Services/microG) se disponibile, altrimenti `LocationManager` GPS puro — notifica con ultimo fix e sorgente attiva, log su logcat | Quale delle due fasi parte davvero su questo device, tempi di fix di entrambe |
 | **M1** ✅ | Server HTTP embedded (`ServerSocket`, zero librerie esterne) nel service, serve `GET /gps` -> `"lat,lon,acc,ts"` da cache | Fatto: `curl` via `adb forward` -> 503 senza fix (corretto), 404 su path sbagliato |
 | **M2** | Script Bruce: connette al hotspot, `httpFetch` con IP diretto, retry/riconnessione se `wifi.scan()` ha droppato la STA, stampa a schermo | end-to-end verso M1 |
-| **M3** | Aggiungi `wifi.scan()` al loop, unisci con GPS, scrivi CSV su SD | File leggibile, coordinate sensate |
-| **M4** | Config persistita (SSID/password), stato a schermo, gestione fix mancante/scaduto | Uso reale senza babysitting |
+| **M3** ✅ | `wifi.scan()` nel loop, ogni rete unita al fix GPS corrente, CSV su SD (`/wardrive_log.csv`) | Da validare sul T-Embed |
+| **M4** ✅ | Fix mancante/scaduto (>20s, `age_ms` dal telefono) non viene loggato, stato a schermo (reti totali, eta' ultimo fix) via `dialog.info()` | Da validare sul T-Embed |
 | **M5** (dopo) | Export formato tipo Wigle, o upload diretto | Opzionale |
 
 ## Rischio principale (aggiornato due volte dopo test reali)

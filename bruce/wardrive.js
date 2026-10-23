@@ -1,26 +1,35 @@
 // wardrive.js - Bruce JS Interpreter
 //
-// M2 con setup semi-automatico: al primo avvio scansiona le reti, fai
+// M2: setup semi-automatico al primo avvio (scansiona le reti, fai
 // scegliere l'hotspot del telefono, chiede la password, si connette,
-// deduce e verifica l'IP del telefono (e' sempre il gateway, visto che
-// ci si connette solo al suo hotspot), salva tutto. Ai run successivi
+// deduce e verifica l'IP del telefono - e' sempre il gateway, visto che
+// ci si connette solo al suo hotspot - salva tutto). Ai run successivi
 // legge la config salvata e parte dritto.
 //
-// M3 aggiungera' wifi.scan() reale (quello wardriving) e storage.write()
-// sopra a fetchGps(), che e' gia' scritta per quello - vedi ensureWifi().
+// M3: wifi.scan() nel loop, ogni rete trovata va nel CSV insieme al fix
+// GPS corrente.
+//
+// M4: fix mancante o scaduto non viene loggato (si salta il giro, non si
+// inventano coordinate vecchie), piccolo stato a schermo (reti loggate
+// in totale, eta' dell'ultimo fix).
 //
 // Protocollo verso il telefono (PLAN.md): GET /gps -> testo
-// "lat,lon,acc,ts", niente JSON. 503 senza corpo = nessun fix ancora sul
-// telefono, non e' un errore.
+// "lat,lon,acc,ts,age_ms", niente JSON. 503 senza corpo = nessun fix
+// ancora sul telefono, non e' un errore. age_ms e' calcolato dal
+// telefono stesso (System.currentTimeMillis() - orario del fix): Bruce
+// non ha un orologio comparabile (millis() e' da boot, non epoch), quindi
+// non puo' calcolare l'eta' da solo - deve leggerla gia' pronta.
 
 var wifi = require("wifi");
 var dialog = require("dialog");
 var storage = require("storage");
 
 var CONFIG_PATH = "/wardrive_config.txt";
+var LOG_PATH = { fs: "sd", path: "/wardrive_log.csv" };
 var PHONE_PORT = 8080;
 var WIFI_CONNECT_TIMEOUT_S = 20;
 var LOOP_DELAY_MS = 2000;
+var STALE_FIX_MS = 20000; // oltre questo, il fix e' troppo vecchio per fidarsene
 
 // ---- config: letta da file, oppure chiesta all'utente al primo avvio ----
 var config = null; // { ssid, password, phoneIp }
@@ -135,9 +144,10 @@ function ensureWifi() {
     return ok;
 }
 
-// Ritorna {lat, lon, acc, ts} se c'e' un fix, null se non c'e' ancora
-// (503, normale) o se qualcosa e' andato storto (loggato, non lanciato:
-// un loop non deve fermarsi per un fetch mancato).
+// Ritorna {lat, lon, acc, ts, ageMs} se c'e' un fix FRESCO, null se non
+// c'e' ancora (503, normale), e' scaduto (M4: meglio niente riga che una
+// riga con coordinate vecchie), o qualcosa e' andato storto (loggato, non
+// lanciato: un loop non deve fermarsi per un fetch mancato).
 function fetchGps() {
     if (!ensureWifi()) {
         return null;
@@ -161,17 +171,60 @@ function fetchGps() {
     }
 
     var parts = res.body.split(",");
-    if (parts.length !== 4) {
+    if (parts.length !== 5) {
         println("risposta malformata: " + res.body);
         return null;
     }
 
-    return {
+    var fix = {
         lat: parse_int(parts[0]),
         lon: parse_int(parts[1]),
         acc: parse_int(parts[2]),
-        ts: parse_int(parts[3])
+        ts: parse_int(parts[3]),
+        ageMs: parse_int(parts[4])
     };
+
+    if (fix.ageMs > STALE_FIX_MS) {
+        println("fix vecchio di " + to_string(fix.ageMs) + "ms, salto il giro");
+        return null;
+    }
+
+    return fix;
+}
+
+// Niente replace()/regex garantiti su questo motore: split+join togli
+// le virgole dall'SSID senza serve altro, cosi' non spaccano le colonne
+// del CSV.
+function csvSafe(text) {
+    return to_string(text).split(",").join(";");
+}
+
+function ensureLogHeader() {
+    try {
+        storage.read(LOG_PATH);
+    } catch (e) {
+        storage.write(LOG_PATH, "ts,lat,lon,acc_m,ssid,mac,enc\n", "write");
+    }
+}
+
+// Una riga per rete trovata, stesso fix per tutte (uno scan e' quasi
+// istantaneo rispetto al movimento). Ritorna quante righe ha scritto.
+function logNetworks(nets, fix) {
+    var lines = "";
+    for (var i = 0; i < nets.length; i++) {
+        var n = nets[i];
+        lines += to_string(fix.ts) + "," +
+            to_string(fix.lat) + "," +
+            to_string(fix.lon) + "," +
+            to_string(fix.acc) + "," +
+            csvSafe(n.SSID) + "," +
+            to_string(n.MAC) + "," +
+            to_string(n.encryptionType) + "\n";
+    }
+    if (lines.length > 0) {
+        storage.write(LOG_PATH, lines, "append");
+    }
+    return nets.length;
 }
 
 // ---- avvio ----
@@ -185,14 +238,34 @@ if (!config) {
     println("Setup non completato, script interrotto.");
 } else {
     println("wardrive.js - telefono su " + config.phoneIp + ":" + PHONE_PORT);
+    ensureLogHeader();
+
+    var totalLogged = 0;
+
     while (true) {
         var fix = fetchGps();
-        if (fix) {
-            println("fix: " + to_string(fix.lat) + "," + to_string(fix.lon) +
-                " (+-" + to_string(fix.acc) + "m)");
+
+        if (!fix) {
+            dialog.info("In attesa di un fix GPS valido...");
+            println("...nessun fix valido, salto lo scan...");
         } else {
-            println("...nessun fix ancora...");
+            // wifi.scan() puo' far cadere la STA per un istante (deciso
+            // in PLAN.md): non serve gestirlo qui, il prossimo
+            // fetchGps() la recupera da solo via ensureWifi().
+            var nets = wifi.scan();
+            var count = logNetworks(nets, fix);
+            totalLogged += count;
+
+            dialog.info(
+                "Reti loggate: " + to_string(totalLogged) +
+                " | ultimo fix " + to_string(fix.ageMs) + "ms fa"
+            );
+            println(
+                "loggate " + to_string(count) + " reti @ " +
+                to_string(fix.lat) + "," + to_string(fix.lon)
+            );
         }
+
         delay(LOOP_DELAY_MS);
     }
 }
