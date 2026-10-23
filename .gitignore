@@ -3,3 +3,13 @@
 __pycache__/
 *.pyc
 .vscode/
+
+# Android (phone/gps-bridge)
+local.properties
+.gradle/
+*/build/
+*/*/build/
+.idea/
+*.iml
+.cxx/
+captures/
