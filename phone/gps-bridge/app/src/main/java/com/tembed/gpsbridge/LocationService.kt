@@ -167,6 +167,12 @@ class LocationService : Service() {
         fusedClient = client
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, MIN_TIME_MS).build()
         client.requestLocationUpdates(request, fusedCallback, Looper.getMainLooper())
+            .addOnFailureListener { e ->
+                // Senza questo, una richiesta rifiutata resta silenziosa:
+                // 'in attesa del primo fix' per sempre, senza nessun errore
+                // visibile da nessuna parte.
+                Log.e(TAG, "requestLocationUpdates (Fused) rifiutata", e)
+            }
     }
 
     private fun startGpsOnlyUpdates() {

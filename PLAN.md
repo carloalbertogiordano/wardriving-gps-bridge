@@ -52,18 +52,30 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
 | **M4** | Config persistita (SSID/password), stato a schermo, gestione fix mancante/scaduto | Uso reale senza babysitting |
 | **M5** (dopo) | Export formato tipo Wigle, o upload diretto | Opzionale |
 
-## Rischio principale (aggiornato dopo il test reale)
+## Rischio principale (aggiornato due volte dopo test reali)
 
-GrapheneOS non ha Google Play Services, ma l'utente ha microG installato,
-che implementa la stessa API (`FusedLocationProviderClient`) spacciandosi
-per una versione sempre aggiornata di Play Services — passa il check
-ufficiale `GoogleApiAvailability.isGooglePlayServicesAvailable()`.
+**Primo test**: col solo GPS puro, zero satelliti usati in fix indoor
+(`dumpsys location` -> `sv status messages ... used in fix: 0`,
+`last location=null`). Limite reale, non un bug.
 
-`LocationService` prova prima Fused (via microG), e usa `GPS_PROVIDER`
-puro solo come fallback se quel check fallisce. Verificato sul device:
-col solo GPS puro, zero satelliti usati in fix indoor (`dumpsys location`
--> `sv status messages ... used in fix: 0`, `last location=null`) —
-limite reale, non un bug. Da qui la doppia fase.
+**Secondo test**: l'utente non ha microG, ma il **Sandboxed Google Play**
+di GrapheneOS (GMS reale, sandboxato). `LocationService` prova Fused
+Location per primo via `GoogleApiAvailability`, che passa anche qui. Ma
+`dumpsys`/logcat mostrano la richiesta rerouted su
+`app.grapheneos.gmscompat.location.OsLocationProvider` — e per design
+GrapheneOS, di default, **inoltra le richieste di Play al servizio
+location del sistema ed emula il network location col solo GNSS**
+(scelta di privacy: Play non riceve mai le reti WiFi/celle vicine).
+Risultato: "Fused" su questo setup e' identico al GPS puro, nessun fix
+indoor via WiFi.
+
+Tre strade, nessuna automatica nel codice (sono scelte privacy
+dell'utente):
+1. Attivare la localizzazione di rete di Google in GrapheneOS (opt-in
+   esplicito, manda WiFi/celle vicine a Google).
+2. Continuare a testare solo all'aperto (nessun cambiamento software).
+3. microG con backend NLP offline (es. DejaVu) — niente terzi, ma setup e
+   database locale da costruire nel tempo.
 
 ## Struttura repo
 
