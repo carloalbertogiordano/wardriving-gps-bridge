@@ -31,6 +31,8 @@ android {
     }
 }
 
-// Nessuna dipendenza esterna in M0: solo framework Android + stdlib Kotlin.
-// android.useAndroidX=false in gradle.properties, di proposito.
-dependencies {}
+dependencies {
+    // Fused Location (Play Services / microG): usato quando disponibile,
+    // con fallback al LocationManager.GPS_PROVIDER puro di M0 se assente.
+    implementation 'com.google.android.gms:play-services-location:21.3.0'
+}

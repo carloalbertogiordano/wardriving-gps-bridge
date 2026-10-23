@@ -35,7 +35,8 @@ class MainActivity : Activity() {
 
         LocationService.onFix = { fix ->
             runOnUiThread {
-                statusText.text = "lat=%.5f lon=%.5f (+-%.0fm)"
+                val sourceLabel = if (fix.source == LocationService.Mode.FUSED) "Fused" else "GPS diretto"
+                statusText.text = "[$sourceLabel] lat=%.5f lon=%.5f (+-%.0fm)"
                     .format(fix.lat, fix.lon, fix.accuracyMeters)
             }
         }

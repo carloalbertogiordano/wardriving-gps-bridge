@@ -1,18 +1,29 @@
 # GPS Bridge — app telefono (M0)
 
-App Android Kotlin minimale, zero dipendenze esterne (no AndroidX, no Play
-Services — `android.useAndroidX=false` in `gradle.properties` di proposito).
-Pensata per girare su GrapheneOS: usa solo `LocationManager` con
-`GPS_PROVIDER` diretto.
+App Android Kotlin per GrapheneOS, a due fasi:
+
+1. **Fused Location** (`play-services-location`), se il device ha
+   un'implementazione valida — su GrapheneOS tipicamente microG, che si
+   spaccia per Play Services sempre aggiornate per passare il check
+   ufficiale. Da' fix anche indoor (WiFi/rete), non solo satellite.
+2. **Fallback a `LocationManager.GPS_PROVIDER`** puro, se la fase 1 non è
+   disponibile. Solo outdoor, nessun aiuto di rete.
+
+Questo porta dentro AndroidX come dipendenza transitiva — non è più "zero
+dipendenze" come nella primissima versione, scelta deliberata per avere
+Fused Location.
 
 ## Cosa fa adesso (M0)
 
 - Bottone Avvia/Ferma nella UI.
-- `LocationService` in foreground, richiede update GPS, mostra l'ultimo fix
-  in notifica e logga su logcat (`tag: LocationService`).
-- `LocationService.lastFix` (companion object) tiene l'ultimo fix in cache:
-  è il punto da cui M1 leggerà per rispondere a Bruce senza mai fare una
-  lettura GPS sincrona per richiesta.
+- `LocationService` in foreground: al via, controlla con
+  `GoogleApiAvailability` se Fused Location è disponibile, sceglie la fase,
+  mostra quale delle due è attiva in notifica e nella UI, logga su logcat
+  (`tag: LocationService`).
+- `LocationService.lastFix` (companion object) tiene l'ultimo fix in cache,
+  con dentro anche `source` (FUSED o GPS_ONLY): è il punto da cui M1
+  leggerà per rispondere a Bruce senza mai fare una lettura GPS sincrona
+  per richiesta.
 
 ## Come compilarla (testato su Fedora 44)
 

@@ -15,54 +15,63 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 
 /**
- * M0: tiene acceso il GPS (LocationManager.GPS_PROVIDER puro, niente
- * Play Services) e mantiene l'ultimo fix in una cache statica.
+ * Due fasi, in ordine:
  *
- * In M1 un server HTTP leggerà `LocationService.lastFix` per rispondere
- * a Bruce senza fare mai una lettura GPS sincrona per richiesta.
+ * 1. Fused Location (Play Services / microG), se il device ne ha una
+ *    implementazione valida — su GrapheneOS, questo significa microG con
+ *    il suo versionCode finto per passare il check di disponibilita'.
+ *    Da' fix indoor via WiFi/rete, non solo satellite.
+ * 2. Fallback a LocationManager.GPS_PROVIDER puro (quello di M0), se Fused
+ *    Location non e' disponibile. Solo outdoor, nessun aiuto di rete.
+ *
+ * Qualunque sia la fase attiva, il risultato finisce sempre in
+ * `LocationService.lastFix` — M1 legge solo quello, non gli importa quale
+ * delle due l'ha prodotto.
  */
 class LocationService : Service() {
+
+    enum class Mode { FUSED, GPS_ONLY }
 
     data class Fix(
         val lat: Double,
         val lon: Double,
         val accuracyMeters: Float,
-        val timeMillis: Long
+        val timeMillis: Long,
+        val source: Mode
     )
 
     companion object {
         private const val TAG = "LocationService"
         private const val CHANNEL_ID = "gps_bridge_channel"
         private const val NOTIFICATION_ID = 1
-        private const val MIN_TIME_MS = 1000L   // richiedi update al massimo ogni 1s
-        private const val MIN_DISTANCE_M = 0f   // nessun filtro per distanza, vogliamo ogni fix
+        private const val MIN_TIME_MS = 1000L
+        private const val MIN_DISTANCE_M = 0f
 
-        /** Ultimo fix noto, aggiornato solo da questo service. Letto da M1. */
         @Volatile
         var lastFix: Fix? = null
             private set
 
-        /** Callback opzionale per aggiornare la UI mentre l'Activity è in primo piano. */
         @Volatile
         var onFix: ((Fix) -> Unit)? = null
     }
 
     private lateinit var locationManager: LocationManager
+    private var fusedClient: FusedLocationProviderClient? = null
+    private var activeMode: Mode = Mode.GPS_ONLY
 
-    private val listener = object : LocationListener {
+    private val gpsListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
-            val fix = Fix(
-                lat = location.latitude,
-                lon = location.longitude,
-                accuracyMeters = location.accuracy,
-                timeMillis = location.time
-            )
-            lastFix = fix
-            Log.d(TAG, "fix: lat=${fix.lat} lon=${fix.lon} acc=${fix.accuracyMeters}m")
-            updateNotification(fix)
-            onFix?.invoke(fix)
+            onNewLocation(location, Mode.GPS_ONLY)
         }
 
         @Deprecated("Deprecated in API 29, ma ancora richiamato su alcuni OEM/versioni")
@@ -75,6 +84,27 @@ class LocationService : Service() {
         }
     }
 
+    private val fusedCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            val location = result.lastLocation ?: return
+            onNewLocation(location, Mode.FUSED)
+        }
+    }
+
+    private fun onNewLocation(location: Location, source: Mode) {
+        val fix = Fix(
+            lat = location.latitude,
+            lon = location.longitude,
+            accuracyMeters = location.accuracy,
+            timeMillis = location.time,
+            source = source
+        )
+        lastFix = fix
+        Log.d(TAG, "fix [$source]: lat=${fix.lat} lon=${fix.lon} acc=${fix.accuracyMeters}m")
+        updateNotification(fix)
+        onFix?.invoke(fix)
+    }
+
     override fun onCreate() {
         super.onCreate()
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
@@ -82,16 +112,17 @@ class LocationService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = buildNotification("In attesa del primo fix GPS...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            )
+        val fusedAvailable = isFusedLocationAvailable()
+        activeMode = if (fusedAvailable) Mode.FUSED else Mode.GPS_ONLY
+
+        val startupText = if (fusedAvailable) {
+            "Play Services/microG trovato: uso Fused Location (meglio anche indoor)."
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            "Play Services/microG non disponibile: uso GPS diretto (serve cielo libero)."
         }
+        Log.i(TAG, startupText)
+
+        startForeground(NOTIFICATION_ID, buildNotification(startupText, activeMode))
 
         val hasFinePermission = checkSelfPermission(
             android.Manifest.permission.ACCESS_FINE_LOCATION
@@ -103,20 +134,14 @@ class LocationService : Service() {
             return START_NOT_STICKY
         }
 
-        if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            Log.w(TAG, "GPS_PROVIDER non abilitato nelle impostazioni di sistema")
-        }
-
         try {
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                MIN_TIME_MS,
-                MIN_DISTANCE_M,
-                listener,
-                Looper.getMainLooper()
-            )
+            if (activeMode == Mode.FUSED) {
+                startFusedUpdates()
+            } else {
+                startGpsOnlyUpdates()
+            }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException richiedendo gli update GPS", e)
+            Log.e(TAG, "SecurityException richiedendo gli update di posizione", e)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -124,8 +149,42 @@ class LocationService : Service() {
         return START_STICKY
     }
 
+    /**
+     * `isGooglePlayServicesAvailable` e' il check ufficiale: ritorna SUCCESS
+     * sia con Play Services vere sia con microG, che si spaccia per una
+     * versione sempre aggiornata apposta per passare questo controllo.
+     */
+    private fun isFusedLocationAvailable(): Boolean {
+        val result = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
+        if (result != ConnectionResult.SUCCESS) {
+            Log.i(TAG, "GoogleApiAvailability = $result (non SUCCESS), fallback a GPS puro")
+        }
+        return result == ConnectionResult.SUCCESS
+    }
+
+    private fun startFusedUpdates() {
+        val client = LocationServices.getFusedLocationProviderClient(this)
+        fusedClient = client
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, MIN_TIME_MS).build()
+        client.requestLocationUpdates(request, fusedCallback, Looper.getMainLooper())
+    }
+
+    private fun startGpsOnlyUpdates() {
+        if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            Log.w(TAG, "GPS_PROVIDER non abilitato nelle impostazioni di sistema")
+        }
+        locationManager.requestLocationUpdates(
+            LocationManager.GPS_PROVIDER,
+            MIN_TIME_MS,
+            MIN_DISTANCE_M,
+            gpsListener,
+            Looper.getMainLooper()
+        )
+    }
+
     override fun onDestroy() {
-        locationManager.removeUpdates(listener)
+        fusedClient?.removeLocationUpdates(fusedCallback)
+        locationManager.removeUpdates(gpsListener)
         lastFix = null
         super.onDestroy()
     }
@@ -144,15 +203,16 @@ class LocationService : Service() {
         }
     }
 
-    private fun buildNotification(text: String): Notification {
+    private fun buildNotification(text: String, mode: Mode): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val title = if (mode == Mode.FUSED) "GPS Bridge (Fused)" else "GPS Bridge (GPS diretto)"
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("GPS Bridge attivo")
+            .setContentTitle(title)
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(openAppIntent)
@@ -162,6 +222,6 @@ class LocationService : Service() {
     private fun updateNotification(fix: Fix) {
         val text = "lat=%.5f lon=%.5f (+-%.0fm)".format(fix.lat, fix.lon, fix.accuracyMeters)
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(text))
+        manager.notify(NOTIFICATION_ID, buildNotification(text, fix.source))
     }
 }
