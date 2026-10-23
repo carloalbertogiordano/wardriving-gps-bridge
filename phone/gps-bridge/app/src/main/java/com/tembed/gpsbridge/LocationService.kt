@@ -56,6 +56,7 @@ class LocationService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val MIN_TIME_MS = 1000L
         private const val MIN_DISTANCE_M = 0f
+        const val HTTP_PORT = 8080
 
         @Volatile
         var lastFix: Fix? = null
@@ -68,6 +69,7 @@ class LocationService : Service() {
     private lateinit var locationManager: LocationManager
     private var fusedClient: FusedLocationProviderClient? = null
     private var activeMode: Mode = Mode.GPS_ONLY
+    private val httpServer = HttpGpsServer(HTTP_PORT)
 
     private val gpsListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -109,6 +111,7 @@ class LocationService : Service() {
         super.onCreate()
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         createNotificationChannel()
+        httpServer.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -146,7 +149,12 @@ class LocationService : Service() {
             return START_NOT_STICKY
         }
 
-        return START_STICKY
+        // NON START_STICKY: un restart automatico di Android avverrebbe da
+        // background, e da Android 12 un foreground service di tipo
+        // 'location' non puo' avviarsi da background
+        // (ForegroundServiceStartNotAllowedException) - loop di crash
+        // altrimenti. L'utente riavvia col bottone, non il sistema.
+        return START_NOT_STICKY
     }
 
     /**
@@ -189,6 +197,7 @@ class LocationService : Service() {
     }
 
     override fun onDestroy() {
+        httpServer.stop()
         fusedClient?.removeLocationUpdates(fusedCallback)
         locationManager.removeUpdates(gpsListener)
         lastFix = null

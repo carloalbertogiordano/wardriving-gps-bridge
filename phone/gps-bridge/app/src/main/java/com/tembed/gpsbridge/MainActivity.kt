@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 /**
  * M0: bottone Start/Stop per LocationService. Nessuna persistenza dello
@@ -21,6 +23,7 @@ class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
     private lateinit var toggleButton: Button
+    private lateinit var serverInfoText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,6 +31,7 @@ class MainActivity : Activity() {
 
         statusText = findViewById(R.id.statusText)
         toggleButton = findViewById(R.id.toggleButton)
+        serverInfoText = findViewById(R.id.serverInfoText)
 
         toggleButton.setOnClickListener {
             if (!serviceRunning) requestPermissionsAndStart() else stopService()
@@ -91,6 +95,8 @@ class MainActivity : Activity() {
         serviceRunning = true
         toggleButton.text = "Ferma"
         statusText.text = "In attesa del primo fix..."
+        serverInfoText.text = "Server su:\n" + localIpAddresses()
+            .joinToString("\n") { "http://$it:${LocationService.HTTP_PORT}/gps" }
     }
 
     private fun stopService() {
@@ -98,5 +104,17 @@ class MainActivity : Activity() {
         serviceRunning = false
         toggleButton.text = "Avvia"
         statusText.text = "GPS: fermo"
+        serverInfoText.text = ""
+    }
+
+    /** Tutti gli IPv4 non-loopback: con l'hotspot attivo di solito ce n'e' uno solo. */
+    private fun localIpAddresses(): List<String> = try {
+        NetworkInterface.getNetworkInterfaces().asSequence()
+            .flatMap { it.inetAddresses.asSequence() }
+            .filter { !it.isLoopbackAddress && it is Inet4Address }
+            .mapNotNull { it.hostAddress }
+            .toList()
+    } catch (e: Exception) {
+        emptyList()
     }
 }
