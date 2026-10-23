@@ -12,3 +12,6 @@ build/
 *.iml
 .cxx/
 captures/
+
+# JS harness (tools/js-harness)
+tools/js-harness/build/

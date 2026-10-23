@@ -112,5 +112,32 @@ dell'utente):
 wardriving-gps-bridge/
   bruce/    <- script JS per Bruce (M2, M3, M4)
   phone/    <- app Android Kotlin (M0, M1)
+  tools/js-harness/  <- interprete mquickjs standalone per validare gli
+                        script Bruce prima di caricarli (vedi sotto)
   PLAN.md
 ```
+
+## Harness di verifica JS (dopo tre bug reali trovati solo sul T-Embed)
+
+Il primo run reale sul T-Embed ha dato `TypeError: not a function` due
+volte. Causa: il firmware installato e' **1.16.1**, e la sua tabella
+reale delle API (`mqjs_stdlib.c`) non coincide sempre con main branch su
+GitHub. Tre bug confermati leggendo il codice esatto di quella versione:
+
+1. `wifi.ipAddress()` non esiste -> e' `wifi.getIPAddress()`.
+2. bare `keyboard(...)` non esiste -> e' `dialog.prompt(...)` (stesso
+   `native_keyboard` dentro, nomi diversi).
+3. bare `println(...)` non esiste -> esiste solo dentro moduli
+   (`serial.println`, `display.println`, `badusb.println`).
+
+Investigare un bug alla volta leggendo grep sparsi non scala: costruito
+`tools/js-harness/`, un **vero** interprete mquickjs (quello reale che
+Bruce usa, `BruceDevices/mquickjs`) collegato alla tabella delle API
+**esatta** della versione installata, con stub per le funzioni native
+(13 con comportamento finto ma plausibile - wifi.scan/connect/httpFetch,
+dialog.choice/keyboard, storage.read/write, serial.println - le altre
+~200 ritornano solo `undefined`, non servono al nostro script). Non
+vendorizza il codice di Bruce (AGPL-3.0): lo scarica fresco ogni volta.
+
+D'ora in poi: `./tools/js-harness/build.sh && ./tools/js-harness/build/mqjs bruce/wardrive.js`
+prima di ogni caricamento sul device, non dopo.

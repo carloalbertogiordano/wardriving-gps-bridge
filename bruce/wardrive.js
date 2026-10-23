@@ -23,6 +23,7 @@
 var wifi = require("wifi");
 var dialog = require("dialog");
 var storage = require("storage");
+var serial = require("serial");
 
 var CONFIG_PATH = "/wardrive_config.txt";
 var LOG_PATH = { fs: "sd", path: "/wardrive_log.csv" };
@@ -52,7 +53,7 @@ function saveConfig(cfg) {
 
 // L'ultimo ottetto a '.1' e' la convenzione quasi universale per il
 // gateway su hotspot Android/router consumer. Si deduce dal nostro
-// stesso IP (wifi.ipAddress()), non c'e' un gatewayIP() in Bruce.
+// stesso IP (wifi.getIPAddress()), non c'e' un gatewayIP() in Bruce.
 function guessGatewayFromOwnIp(ip) {
     var parts = ip.split(".");
     if (parts.length !== 4) return null;
@@ -101,7 +102,11 @@ function runSetupWizard() {
         return null; // annullato
     }
 
-    var password = keyboard("Password WiFi", 63, "Password per " + chosenSsid, true);
+    // bare keyboard() non esiste in 1.16.1 (verificato su mqjs_stdlib.c
+    // reale): e' dialog.prompt(title, maxSize, msg), stesso native_keyboard
+    // dentro, solo niente 4o parametro mask - l'arity e' 3 non 4, ma il
+    // motore passa comunque argc reale quindi il 4o true arriva lo stesso.
+    var password = dialog.prompt("Password WiFi", 63, "Password per " + chosenSsid, true);
 
     dialog.info("Connessione a " + chosenSsid + "...");
     var connected = wifi.connect(chosenSsid, WIFI_CONNECT_TIMEOUT_S, password);
@@ -110,7 +115,7 @@ function runSetupWizard() {
         return null;
     }
 
-    var myIp = wifi.ipAddress();
+    var myIp = wifi.getIPAddress();
     var guessedIp = guessGatewayFromOwnIp(myIp);
     if (!guessedIp) {
         dialog.error("IP locale inatteso: " + to_string(myIp));
@@ -139,7 +144,7 @@ function ensureWifi() {
     }
     var ok = wifi.connect(config.ssid, WIFI_CONNECT_TIMEOUT_S, config.password);
     if (!ok) {
-        println("Riconnessione a " + config.ssid + " fallita.");
+        serial.println("Riconnessione a " + config.ssid + " fallita.");
     }
     return ok;
 }
@@ -158,7 +163,7 @@ function fetchGps() {
     try {
         res = wifi.httpFetch(url);
     } catch (e) {
-        println("telefono non raggiungibile su " + config.phoneIp);
+        serial.println("telefono non raggiungibile su " + config.phoneIp);
         return null;
     }
 
@@ -166,13 +171,13 @@ function fetchGps() {
         return null; // nessun fix sul telefono ancora, non e' un errore
     }
     if (!res.ok) {
-        println("httpFetch " + url + " -> status " + res.status);
+        serial.println("httpFetch " + url + " -> status " + res.status);
         return null;
     }
 
     var parts = res.body.split(",");
     if (parts.length !== 5) {
-        println("risposta malformata: " + res.body);
+        serial.println("risposta malformata: " + res.body);
         return null;
     }
 
@@ -185,7 +190,7 @@ function fetchGps() {
     };
 
     if (fix.ageMs > STALE_FIX_MS) {
-        println("fix vecchio di " + to_string(fix.ageMs) + "ms, salto il giro");
+        serial.println("fix vecchio di " + to_string(fix.ageMs) + "ms, salto il giro");
         return null;
     }
 
@@ -235,9 +240,9 @@ if (!config) {
 }
 
 if (!config) {
-    println("Setup non completato, script interrotto.");
+    serial.println("Setup non completato, script interrotto.");
 } else {
-    println("wardrive.js - telefono su " + config.phoneIp + ":" + PHONE_PORT);
+    serial.println("wardrive.js - telefono su " + config.phoneIp + ":" + PHONE_PORT);
     ensureLogHeader();
 
     var totalLogged = 0;
@@ -247,7 +252,7 @@ if (!config) {
 
         if (!fix) {
             dialog.info("In attesa di un fix GPS valido...");
-            println("...nessun fix valido, salto lo scan...");
+            serial.println("...nessun fix valido, salto lo scan...");
         } else {
             // wifi.scan() puo' far cadere la STA per un istante (deciso
             // in PLAN.md): non serve gestirlo qui, il prossimo
@@ -260,7 +265,7 @@ if (!config) {
                 "Reti loggate: " + to_string(totalLogged) +
                 " | ultimo fix " + to_string(fix.ageMs) + "ms fa"
             );
-            println(
+            serial.println(
                 "loggate " + to_string(count) + " reti @ " +
                 to_string(fix.lat) + "," + to_string(fix.lon)
             );
