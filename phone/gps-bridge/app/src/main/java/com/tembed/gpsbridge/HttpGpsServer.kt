@@ -80,7 +80,9 @@ class HttpGpsServer(private val port: Int) {
                 return
             }
 
-            val body = "%.6f,%.6f,%.0f,%d\n"
+            // Niente '\n' finale: il corpo e' esattamente "lat,lon,acc,ts",
+            // cosi' lo split(",") lato Bruce non deve gestire whitespace.
+            val body = "%.6f,%.6f,%.0f,%d"
                 .format(fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis)
             writeResponse(out, 200, body)
         }
