@@ -12,6 +12,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
@@ -59,6 +60,15 @@ class LocationService : Service() {
         private const val MIN_DISTANCE_M = 0f
         const val HTTP_PORT = 8080
 
+        // Visto su device reale: il flusso di fix si blocca del tutto dopo
+        // una breve raffica (sia in Fused sia in GPS_PROVIDER puro) e non
+        // riparte mai da solo - restava fermo anche 30+ minuti, servizio
+        // vivo ma silenzioso. Non sappiamo se la causa sia nel provider
+        // sandboxed di GrapheneOS o altrove: il watchdog non la risolve,
+        // forza solo una nuova registrazione quando il flusso si ferma.
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
+        private const val STALE_THRESHOLD_MS = 30_000L
+
         @Volatile
         var lastFix: Fix? = null
             private set
@@ -71,6 +81,35 @@ class LocationService : Service() {
     private var fusedClient: FusedLocationProviderClient? = null
     private var activeMode: Mode = Mode.GPS_ONLY
     private val httpServer = HttpGpsServer(HTTP_PORT)
+
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    private var serviceStartMillis = 0L
+
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            val reference = lastFix?.timeMillis ?: serviceStartMillis
+            val age = System.currentTimeMillis() - reference
+            if (age > STALE_THRESHOLD_MS) {
+                Log.w(TAG, "nessun fix da ${age}ms, ri-registro gli update ($activeMode)")
+                reRegisterUpdates()
+            }
+            watchdogHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
+
+    private fun reRegisterUpdates() {
+        try {
+            if (activeMode == Mode.FUSED) {
+                fusedClient?.removeLocationUpdates(fusedCallback)
+                startFusedUpdates()
+            } else {
+                locationManager.removeUpdates(gpsListener)
+                startGpsOnlyUpdates()
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException ri-registrando gli update", e)
+        }
+    }
 
     private val gpsListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -150,6 +189,10 @@ class LocationService : Service() {
             return START_NOT_STICKY
         }
 
+        serviceStartMillis = System.currentTimeMillis()
+        watchdogHandler.removeCallbacks(watchdogRunnable)
+        watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
+
         // NON START_STICKY: un restart automatico di Android avverrebbe da
         // background, e da Android 12 un foreground service di tipo
         // 'location' non puo' avviarsi da background
@@ -198,6 +241,7 @@ class LocationService : Service() {
     }
 
     override fun onDestroy() {
+        watchdogHandler.removeCallbacks(watchdogRunnable)
         httpServer.stop()
         fusedClient?.removeLocationUpdates(fusedCallback)
         locationManager.removeUpdates(gpsListener)
