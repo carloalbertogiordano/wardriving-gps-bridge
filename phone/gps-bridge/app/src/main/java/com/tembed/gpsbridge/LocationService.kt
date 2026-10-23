@@ -151,6 +151,7 @@ class LocationService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("GPS Bridge attivo")
             .setContentText(text)
             .setOngoing(true)
