@@ -14,15 +14,42 @@ Pensata per girare su GrapheneOS: usa solo `LocationManager` con
   è il punto da cui M1 leggerà per rispondere a Bruce senza mai fare una
   lettura GPS sincrona per richiesta.
 
-## Come compilarla
+## Come compilarla (testato su Fedora 44)
 
-Il wrapper Gradle non è incluso per intero (il jar binario non si scrive a
-mano). Due modi:
+Fedora 44 ha tolto JDK 17/21 dai repo (solo `java-25-openjdk` e
+`java-latest-openjdk`), e Gradle 8.7 non gira su JDK 25
+(`Unsupported class file major version 69`). Soluzione: un JDK 21 portatile,
+senza toccare i pacchetti di sistema.
 
-1. **Android Studio** (più semplice): apri la cartella `gps-bridge/` come
-   progetto esistente. Studio genera da solo il wrapper e sincronizza.
-2. **Gradle da riga di comando**, se già installato: dentro `gps-bridge/`,
-   `gradle wrapper --gradle-version 8.7`, poi `./gradlew assembleDebug`.
+```bash
+# 1. JDK 21 portatile (Temurin), non tocca il sistema
+mkdir -p ~/.jdks && cd ~/.jdks
+curl -L -o temurin21.tar.gz \
+  "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse?project=jdk"
+tar xzf temurin21.tar.gz && rm temurin21.tar.gz
+
+# 2. Dillo a Gradle, globalmente per il tuo utente
+mkdir -p ~/.gradle
+echo "org.gradle.java.home=$(ls -d ~/.jdks/jdk-21* | head -1)" >> ~/.gradle/gradle.properties
+
+# 3. Android SDK command-line tools, se non li hai già (es. da Android Studio)
+mkdir -p ~/Android/Sdk/cmdline-tools && cd ~/Android/Sdk/cmdline-tools
+curl -L -o cmdtools.zip \
+  "https://dl.google.com/android/repository/commandlinetools-linux-11479570_latest.zip"
+unzip -q cmdtools.zip && mv cmdline-tools latest && rm cmdtools.zip
+JAVA_HOME=$(ls -d ~/.jdks/jdk-21* | head -1) \
+  ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=~/Android/Sdk \
+  "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+echo "sdk.dir=$HOME/Android/Sdk" > /path/a/gps-bridge/local.properties
+
+# 4. Build
+cd /path/a/gps-bridge
+./gradlew assembleDebug
+```
+
+Se hai già Android Studio installato, il passo 3 è probabilmente superfluo:
+controlla se `~/Android/Sdk` esiste già, in tal caso basta il file
+`local.properties` che ci punta.
 
 ## Permessi richiesti al primo avvio
 
