@@ -46,7 +46,7 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
 | # | Cosa | Valida |
 |---|---|---|
 | **M0** | App Kotlin minimale: bottone Start/Stop, foreground service, due fasi — Fused Location (Play Services/microG) se disponibile, altrimenti `LocationManager` GPS puro — notifica con ultimo fix e sorgente attiva, log su logcat | Quale delle due fasi parte davvero su questo device, tempi di fix di entrambe |
-| **M1** | Server HTTP embedded (`ServerSocket`, zero librerie esterne) nel service, serve `GET /gps` -> `"lat,lon,acc,ts"` da cache | `curl` da PC via hotspot |
+| **M1** ✅ | Server HTTP embedded (`ServerSocket`, zero librerie esterne) nel service, serve `GET /gps` -> `"lat,lon,acc,ts"` da cache | Fatto: `curl` via `adb forward` -> 503 senza fix (corretto), 404 su path sbagliato |
 | **M2** | Script Bruce: connette al hotspot, `httpFetch` con IP diretto, retry/riconnessione se `wifi.scan()` ha droppato la STA, stampa a schermo | end-to-end verso M1 |
 | **M3** | Aggiungi `wifi.scan()` al loop, unisci con GPS, scrivi CSV su SD | File leggibile, coordinate sensate |
 | **M4** | Config persistita (SSID/password), stato a schermo, gestione fix mancante/scaduto | Uso reale senza babysitting |
