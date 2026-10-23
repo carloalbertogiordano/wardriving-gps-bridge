@@ -17,6 +17,14 @@ Uso: python3 gen_stubs.py <undeclared_symbols.txt> <output_dir>
 import sys
 
 REAL_BEHAVIOR = {
+    "native_getEscPress": '''static int esc_call_count = 0;
+JSValue native_getEscPress(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    // simula ESC premuto dopo qualche giro, per esercitare il path di
+    // uscita pulita dai loop - altrimenti resterebbe sempre false e un
+    // test del genere non finirebbe mai (bene testare anche quello).
+    esc_call_count++;
+    return JS_NewBool(esc_call_count > 10);
+}''',
     "native_require": '''JSValue native_require(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     // comportamento reale: lookup sulla global, esattamente come in Bruce.
     // Senza questo require("wifi") ritornerebbe undefined e ogni wifi.X

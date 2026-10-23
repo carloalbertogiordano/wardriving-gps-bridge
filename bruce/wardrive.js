@@ -24,6 +24,7 @@ var wifi = require("wifi");
 var dialog = require("dialog");
 var storage = require("storage");
 var serial = require("serial");
+var keyboard = require("keyboard");
 
 var CONFIG_PATH = "/wardrive_config.txt";
 var LOG_PATH = { fs: "sd", path: "/wardrive_log.csv" };
@@ -282,8 +283,20 @@ if (!config) {
     ensureLogHeader();
 
     var totalLogged = 0;
+    var stopRequested = false;
 
-    while (true) {
+    // ESC non veniva mai controllato: lo script restava bloccato nel
+    // loop per sempre, nessun modo di uscire se non spegnendo il
+    // device. Il CSV e' gia' scritto riga per riga ad ogni giro
+    // (storage.write "append" dentro logNetworks), quindi non serve
+    // nessun salvataggio speciale all'uscita: i dati ci sono sempre,
+    // basta interrompere il while in modo pulito.
+    while (!stopRequested) {
+        if (keyboard.getEscPress()) {
+            stopRequested = true;
+            break;
+        }
+
         var fix = fetchGps();
 
         if (!fix) {
@@ -307,6 +320,20 @@ if (!config) {
             );
         }
 
+        if (keyboard.getEscPress()) {
+            stopRequested = true;
+            break;
+        }
         delay(LOOP_DELAY_MS);
+    }
+
+    if (stopRequested) {
+        // wait=true: altrimenti il messaggio sparisce subito, sovrascritto
+        // dal menu Scripts non appena lo script termina.
+        dialog.success(
+            "Wardriving fermato. " + to_string(totalLogged) +
+            " reti salvate in " + LOG_PATH.path + ".",
+            true
+        );
     }
 }
