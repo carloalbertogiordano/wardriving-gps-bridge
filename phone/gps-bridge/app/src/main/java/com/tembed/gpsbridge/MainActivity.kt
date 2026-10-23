@@ -10,6 +10,7 @@ import android.widget.Button
 import android.widget.TextView
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.util.Locale
 
 /**
  * M0: bottone Start/Stop per LocationService. Nessuna persistenza dello
@@ -40,8 +41,10 @@ class MainActivity : Activity() {
         LocationService.onFix = { fix ->
             runOnUiThread {
                 val sourceLabel = if (fix.source == LocationService.Mode.FUSED) "Fused" else "GPS diretto"
-                statusText.text = "[$sourceLabel] lat=%.5f lon=%.5f (+-%.0fm)"
-                    .format(fix.lat, fix.lon, fix.accuracyMeters)
+                statusText.text = String.format(
+                    Locale.US, "[$sourceLabel] lat=%.5f lon=%.5f (+-%.0fm)",
+                    fix.lat, fix.lon, fix.accuracyMeters
+                )
             }
         }
     }

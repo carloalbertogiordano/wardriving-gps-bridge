@@ -234,24 +234,38 @@ function ensureLogHeader() {
     }
 }
 
-// Una riga per rete trovata, stesso fix per tutte (uno scan e' quasi
-// istantaneo rispetto al movimento). Ritorna quante righe ha scritto.
+// MAC gia' loggati in QUESTA esecuzione dello script. Senza questo, ogni
+// giro del loop rilogga le stesse reti viste al giro precedente (ogni
+// 2s, anche stando fermi) - il contatore a schermo sale all'infinito
+// senza che sia successo niente di nuovo. Dedup solo per sessione, non
+// tra run diversi: rileggere tutto il CSV ad ogni avvio per controllare
+// cosa era gia' stato visto in giri precedenti non vale la complessita'
+// per un tool personale come questo.
+var loggedMacs = {};
+
+// Una riga per rete NUOVA trovata (MAC non ancora loggato in questa
+// sessione), stesso fix per tutte. Ritorna quante righe ha scritto.
 function logNetworks(nets, fix) {
     var lines = "";
+    var newCount = 0;
     for (var i = 0; i < nets.length; i++) {
         var n = nets[i];
+        var mac = to_string(n.MAC);
+        if (loggedMacs[mac]) continue;
+        loggedMacs[mac] = true;
+        newCount++;
         lines += to_string(fix.ts) + "," +
             to_string(fix.lat) + "," +
             to_string(fix.lon) + "," +
             to_string(fix.acc) + "," +
             csvSafe(n.SSID) + "," +
-            to_string(n.MAC) + "," +
+            mac + "," +
             to_string(n.encryptionType) + "\n";
     }
     if (lines.length > 0) {
         storage.write(LOG_PATH, lines, "append");
     }
-    return nets.length;
+    return newCount;
 }
 
 // ---- avvio ----

@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import java.util.Locale
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -235,7 +236,9 @@ class LocationService : Service() {
     }
 
     private fun updateNotification(fix: Fix) {
-        val text = "lat=%.5f lon=%.5f (+-%.0fm)".format(fix.lat, fix.lon, fix.accuracyMeters)
+        val text = String.format(
+            Locale.US, "lat=%.5f lon=%.5f (+-%.0fm)", fix.lat, fix.lon, fix.accuracyMeters
+        )
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(text, fix.source))
     }

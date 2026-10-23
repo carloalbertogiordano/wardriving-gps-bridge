@@ -7,6 +7,7 @@ import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 
 /**
  * Server HTTP minimale per Bruce: GET /gps -> testo "lat,lon,acc,ts" letto
@@ -87,10 +88,21 @@ class HttpGpsServer(private val port: Int) {
             // solo un riferimento assoluto per il log.
             val ageMillis = System.currentTimeMillis() - fix.timeMillis
 
+            // Locale.US esplicito, altrimenti "%.6f".format() usa il
+            // locale di sistema del telefono: su locale italiana (o molte
+            // altre) il separatore decimale diventa la virgola, che
+            // spacca il nostro protocollo a virgole in pezzi in piu' -
+            // trovato su device reale, risposta tipo "41,352781,14,..."
+            // invece di "41.352781,...". Bruce la scartava come
+            // malformata (5 campi attesi, ne arrivavano 7), e il fix
+            // restava invisibile anche con un GPS funzionante.
+            //
             // Niente '\n' finale: il corpo e' esattamente
             // "lat,lon,acc,ts,age_ms", split(",") lato Bruce senza whitespace.
-            val body = "%.6f,%.6f,%.0f,%d,%d"
-                .format(fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis, ageMillis)
+            val body = String.format(
+                Locale.US, "%.6f,%.6f,%.0f,%d,%d",
+                fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis, ageMillis
+            )
             writeResponse(out, 200, body)
         }
     }
