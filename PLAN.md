@@ -21,13 +21,17 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
 
 1. **Hotspot del telefono**, T-Embed come STA client. ~~Niente mDNS: IP e
    porta dell'hotspot si scrivono a mano una volta nello script Bruce.~~
-   **Superato**: dato che ci si connette *solo* all'hotspot del telefono,
-   il telefono e' sempre il gateway della sua sottorete. Bruce non espone
-   un `gatewayIP()` (solo `ipAddress()`, il nostro IP), ma lo si deduce:
-   si prende il proprio IP via `wifi.ipAddress()` e si sostituisce l'ultimo
-   ottetto con `.1` (convenzione quasi universale per hotspot
-   Android/router consumer). Si verifica provandolo dal vivo con una
-   `httpFetch` reale, non per supposizione.
+   ~~Superato: deduzione automatica, ultimo ottetto a '.1'.~~ **Superato
+   di nuovo**: su device reale l'hotspot usa la sottorete
+   `10.48.104.0/24` col telefono su `.130`, non `.1` (verificato via
+   `adb shell ip addr` sull'interfaccia hotspot reale, non per
+   supposizione). `httpFetch` non ha timeout configurabile: un IP
+   indovinato male e irraggiungibile puo' restare bloccato a lungo e far
+   scattare il watchdog dell'ESP32 (crash muto, nessun errore a schermo,
+   config mai salvata perche' il crash arriva prima di `saveConfig()`).
+   Ora: l'IP dedotto resta solo un suggerimento mostrato all'utente, che
+   lo confirma o corregge via `dialog.prompt()` PRIMA di qualunque test
+   di rete. Niente piu' guess-and-hope alla cieca.
 2. **`wifi.scan()` durante connessione STA attiva**: la doc dice che interrompe
    brevemente la connessione. Gestito da subito in M2 con retry/riconnessione
    (`wifi.connected()` check prima di ogni `httpFetch`), non rimandato.

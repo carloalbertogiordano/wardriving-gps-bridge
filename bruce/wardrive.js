@@ -117,23 +117,45 @@ function runSetupWizard() {
 
     var myIp = wifi.getIPAddress();
     var guessedIp = guessGatewayFromOwnIp(myIp);
-    if (!guessedIp) {
-        dialog.error("IP locale inatteso: " + to_string(myIp));
+
+    // httpFetch non ha un timeout configurabile (verificato sul codice):
+    // se l'IP e' sbagliato e non risponde affatto, la connessione resta
+    // bloccata a lungo e puo' far scattare il watchdog dell'ESP32 (crash
+    // senza nessun errore a schermo - visto su device reale: l'euristica
+    // '.1' non vale per tutti gli hotspot, es. 10.48.104.130). Meglio far
+    // confermare o correggere l'IP all'utente PRIMA di un test di rete
+    // alla cieca, che indovinare e sperare.
+    dialog.info(
+        "IP ipotizzato: " + (guessedIp ? guessedIp : "nessuno") +
+        ". Nella prossima schermata confermalo o correggilo " +
+        "(guardalo sull'app del telefono se non sei sicuro).",
+        true // aspetta la pressione, cosi' l'utente legge prima della tastiera
+    );
+
+    var typedIp = dialog.prompt(
+        "IP del telefono",
+        15,
+        guessedIp ? ("Lascia vuoto per " + guessedIp) : "Es: 10.48.104.130"
+    );
+    var phoneIp = typedIp ? typedIp : guessedIp;
+
+    if (!phoneIp || phoneIp.split(".").length !== 4) {
+        dialog.error("IP non valido: " + to_string(phoneIp));
         return null;
     }
 
-    dialog.info("Cerco il server sul telefono (" + guessedIp + ")...");
-    if (!canReachPhone(guessedIp)) {
+    dialog.info("Cerco il server sul telefono (" + phoneIp + ")...");
+    if (!canReachPhone(phoneIp)) {
         dialog.error(
-            "Telefono non trovato su " + guessedIp +
-            ". App GPS Bridge avviata sul telefono?"
+            "Telefono non trovato su " + phoneIp +
+            ". App GPS Bridge avviata sul telefono? IP corretto?"
         );
         return null;
     }
 
-    dialog.success("Connesso. Telefono trovato su " + guessedIp + ".");
+    dialog.success("Connesso. Telefono trovato su " + phoneIp + ".");
 
-    var cfg = { ssid: chosenSsid, password: password, phoneIp: guessedIp };
+    var cfg = { ssid: chosenSsid, password: password, phoneIp: phoneIp };
     saveConfig(cfg);
     return cfg;
 }
