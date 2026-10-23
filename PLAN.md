@@ -19,11 +19,27 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
 
 ## Decisioni fissate
 
-1. **Hotspot del telefono**, T-Embed come STA client. Niente mDNS: IP e porta
-   dell'hotspot si scrivono a mano una volta nello script Bruce.
+1. **Hotspot del telefono**, T-Embed come STA client. ~~Niente mDNS: IP e
+   porta dell'hotspot si scrivono a mano una volta nello script Bruce.~~
+   **Superato**: dato che ci si connette *solo* all'hotspot del telefono,
+   il telefono e' sempre il gateway della sua sottorete. Bruce non espone
+   un `gatewayIP()` (solo `ipAddress()`, il nostro IP), ma lo si deduce:
+   si prende il proprio IP via `wifi.ipAddress()` e si sostituisce l'ultimo
+   ottetto con `.1` (convenzione quasi universale per hotspot
+   Android/router consumer). Si verifica provandolo dal vivo con una
+   `httpFetch` reale, non per supposizione.
 2. **`wifi.scan()` durante connessione STA attiva**: la doc dice che interrompe
    brevemente la connessione. Gestito da subito in M2 con retry/riconnessione
    (`wifi.connected()` check prima di ogni `httpFetch`), non rimandato.
+3. **Setup semi-automatico in UI**, non piu' config scritta a mano: lo
+   script scansiona le reti (`wifi.scan()`), fa scegliere l'SSID
+   (`dialog.choice()`), chiede la password mascherata
+   (`keyboard(title, maxSize, msg, true)`), si connette, deduce e
+   verifica l'IP del telefono come al punto 1, e salva tutto in
+   `/wardrive_config.txt` (LittleFS, default di `storage.write` quando il
+   path e' una stringa semplice) per non rifare il setup ai run
+   successivi. `storage.write` di default fa *append*: va passato
+   `"write"` esplicito o la config si accumula ad ogni esecuzione.
 3. **Protocollo GPS tra i due device, bloccato dopo analisi del codice reale**:
    - `httpFetch()` di Bruce fa `http.setReuse(false)` (visto in `wifi_js.cpp`):
      niente keep-alive, mai, è hardcoded in C++. Costante fissa, non
@@ -32,7 +48,8 @@ collega come client, scarica la posizione via HTTP e fa lo scan WiFi in loop.
      non il fetch GPS (10-40ms su LAN locale). Ottimizzare il protocollo non
      sposta il loop in modo percepibile, ma si fa comunque perché è gratis:
      - **IP diretto** nell'URL (`http://192.168.x.x:porta/gps`), niente
-       hostname, salta la risoluzione DNS.
+       hostname, salta la risoluzione DNS. Dedotto automaticamente (punto
+       1 sopra), non piu' scritto a mano.
      - **Risposta testo semplice**, non JSON: `"lat,lon,acc,ts"`. JSON.parse/
        stringify esistono nel motore (confermato in `mqjs_stdlib`), ma per
        questo payload il parsing testo è comunque più leggero e si fa subito.
