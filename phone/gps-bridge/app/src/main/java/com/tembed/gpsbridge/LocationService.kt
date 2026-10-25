@@ -77,6 +77,12 @@ class LocationService : Service() {
 
         @Volatile
         var onFix: ((Fix) -> Unit)? = null
+
+        // The UI reads this to show Start/Stop correctly when it is reopened
+        // while the service is already running.
+        @Volatile
+        var isRunning: Boolean = false
+            private set
     }
 
     private lateinit var locationManager: LocationManager
@@ -156,6 +162,7 @@ class LocationService : Service() {
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         createNotificationChannel()
         httpServer.start()
+        isRunning = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -255,6 +262,7 @@ class LocationService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         watchdogHandler.removeCallbacks(watchdogRunnable)
         httpServer.stop()
         fusedClient?.removeLocationUpdates(fusedCallback)
