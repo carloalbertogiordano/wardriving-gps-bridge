@@ -660,6 +660,7 @@ var HELP =
 // ---- main menu ----
 
 function mainMenu() {
+    var backPresses = 0;
     while (true) {
         var phone = selectedPhone();
         var options = [
@@ -671,6 +672,17 @@ function mainMenu() {
             "Exit"
         ];
         var pick = menu.show("Wardriving", options);
+        serial.println("main menu -> " + to_string(pick));
+
+        // -1 is the back key. Leaving needs the Exit entry or a second back
+        // press in a row, so a stray key press left over from launching the
+        // script cannot close it before the menu has even been read.
+        if (pick < 0) {
+            backPresses++;
+            if (backPresses >= 2) return;
+            continue;
+        }
+        backPresses = 0;
 
         if (pick === 0) startWardriving();
         else if (pick === 1) {
@@ -680,7 +692,7 @@ function mainMenu() {
         else if (pick === 2) pairNewPhone();
         else if (pick === 3) forgetPhone();
         else if (pick === 4) dialog.viewText(HELP, "Help");
-        else return; // Exit, or the back key
+        else return; // Exit
     }
 }
 
@@ -690,5 +702,13 @@ fsName = pickStorage();
 if (fsName !== "sd") {
     dialog.warning("No SD card: using internal storage, space is limited.", true);
 }
-loadStore();
-mainMenu();
+
+// An uncaught error would end the script silently, the screen just going back
+// to Bruce's menu: show it and log it instead.
+try {
+    loadStore();
+    mainMenu();
+} catch (err) {
+    serial.println("wardrive.js error: " + to_string(err));
+    dialog.error("Script error: " + to_string(err), true);
+}
