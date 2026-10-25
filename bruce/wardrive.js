@@ -633,10 +633,11 @@ function startWardriving() {
         if (!phone) return;
     }
 
-    if (!connectAndVerify(phone)) return;
-
-    var ready = menu.show("Ready: " + phone.ssid, ["Start (ESC stops)", "Back"]);
+    // Nothing touches the network until the user says so here.
+    var ready = menu.show("Phone: " + phone.ssid, ["Connect and start (ESC stops)", "Back"]);
     if (ready !== 0) return;
+
+    if (!connectAndVerify(phone)) return;
     runWardriving(phone);
 }
 
@@ -697,6 +698,15 @@ function mainMenu() {
 }
 
 // ---- start ----
+
+// The key press that launched the script can still be registered when the
+// first menu appears and would select its first entry on its own. Wait a
+// moment and read the keys once to clear them: nothing may happen before the
+// user acts.
+delay(400);
+keyboard.getAnyPress();
+keyboard.getSelPress();
+keyboard.getEscPress();
 
 fsName = pickStorage();
 if (fsName !== "sd") {
