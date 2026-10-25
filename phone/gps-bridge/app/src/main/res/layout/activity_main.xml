@@ -10,7 +10,7 @@
         android:id="@+id/statusText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="GPS: fermo"
+        android:text="GPS: stopped"
         android:textSize="18sp"
         android:gravity="center"
         android:layout_marginBottom="24dp" />
@@ -19,7 +19,7 @@
         android:id="@+id/toggleButton"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Avvia" />
+        android:text="Start" />
 
     <TextView
         android:id="@+id/serverInfoText"

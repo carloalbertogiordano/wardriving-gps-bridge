@@ -1,24 +1,30 @@
 // wardrive.js - Bruce JS Interpreter
 //
-// M2: setup semi-automatico al primo avvio (scansiona le reti, fai
-// scegliere l'hotspot del telefono, chiede la password, si connette,
-// deduce e verifica l'IP del telefono - e' sempre il gateway, visto che
-// ci si connette solo al suo hotspot - salva tutto). Ai run successivi
-// legge la config salvata e parte dritto.
+// Wardriving with the phone's GPS: connects to the phone's hotspot, polls
+// the GPS Bridge app for the current fix and logs every new Wi-Fi network
+// found by wifi.scan() together with that fix.
 //
-// M3: wifi.scan() nel loop, ogni rete trovata va nel CSV insieme al fix
-// GPS corrente.
+// First run: guided setup (scan, pick the hotspot SSID, password, confirm
+// the phone IP, verify the server answers) and the result is saved, so
+// later runs start straight away.
 //
-// M4: fix mancante o scaduto non viene loggato (si salta il giro, non si
-// inventano coordinate vecchie), piccolo stato a schermo (reti loggate
-// in totale, eta' dell'ultimo fix).
+// Phone protocol (PLAN.md): GET /gps -> plain text
+// "lat,lon,acc,ts,age_ms,alt" (the trailing alt is optional, older app
+// builds send five fields). 503 with no body = no fix on the phone yet,
+// not an error. age_ms is computed by the phone itself
+// (System.currentTimeMillis() - fix time): Bruce has no clock comparable
+// to the phone's (millis() counts from boot, not epoch), so it must read
+// the age ready-made and never subtract timestamps on its own.
 //
-// Protocollo verso il telefono (PLAN.md): GET /gps -> testo
-// "lat,lon,acc,ts,age_ms", niente JSON. 503 senza corpo = nessun fix
-// ancora sul telefono, non e' un errore. age_ms e' calcolato dal
-// telefono stesso (System.currentTimeMillis() - orario del fix): Bruce
-// non ha un orologio comparabile (millis() e' da boot, non epoch), quindi
-// non puo' calcolare l'eta' da solo - deve leggerla gia' pronta.
+// File layout - everything lives in a single folder, preferably on the SD
+// card so LittleFS does not fill up with logs:
+//
+//   /BruceWardriving/PhoneGPS/config.txt                saved setup
+//   /BruceWardriving/PhoneGPS/runs/<yymmdd_hhmmss>.csv  one Wigle file per run
+//
+// Each run gets its own file named after the time of its first valid fix.
+// The format is the same WigleWifi-1.6 the stock Bruce wardriving module
+// writes, so files upload to wigle.net as they are.
 
 var wifi = require("wifi");
 var dialog = require("dialog");
@@ -26,47 +32,88 @@ var storage = require("storage");
 var serial = require("serial");
 var keyboard = require("keyboard");
 
-var CONFIG_PATH = "/wardrive_config.txt";
-var LOG_DIR = "/BruceWardriving"; // stessa cartella del wardriving nativo di Bruce
-var MAX_TRACKED_MACS = 1500; // tetto della tabella di dedup, vedi sotto
+var BASE_DIR = "/BruceWardriving/PhoneGPS";
+var RUNS_DIR = BASE_DIR + "/runs";
+var CONFIG_FILE = BASE_DIR + "/config.txt";
+var LEGACY_CONFIG_FILE = "/wardrive_config.txt"; // old LittleFS location
+var MIN_LITTLEFS_FREE_KB = 100; // below this, refuse to log on LittleFS
+
 var PHONE_PORT = 8080;
 var WIFI_CONNECT_TIMEOUT_S = 20;
 var LOOP_DELAY_MS = 2000;
-var STALE_FIX_MS = 20000; // oltre questo, il fix e' troppo vecchio per fidarsene
+var STALE_FIX_MS = 20000; // older than this, the fix is not trusted
+var MAX_TRACKED_MACS = 1500; // cap of the dedup table, see below
 
-// ---- config: letta da file, oppure chiesta all'utente al primo avvio ----
+// ---- storage: SD card first, LittleFS only as a fallback ----
+
+var fsName = "littlefs"; // set by pickStorage()
+
+function pickStorage() {
+    try {
+        if (storage.spaceSDCard().total > 0) return "sd";
+    } catch (e) {
+        // no card mounted
+    }
+    return "littlefs";
+}
+
+function pathOf(path) {
+    return { fs: fsName, path: path };
+}
+
+// ---- config: read from file, or asked to the user on first run ----
+
 var config = null; // { ssid, password, phoneIp }
 
-function loadConfig() {
-    try {
-        var raw = storage.read(CONFIG_PATH);
-        var lines = raw.split("\n");
-        if (lines.length < 3) return null;
-        return { ssid: lines[0], password: lines[1], phoneIp: lines[2] };
-    } catch (e) {
-        return null; // normale al primissimo avvio, nessun file ancora
-    }
+function parseConfig(raw) {
+    var lines = raw.split("\n");
+    if (lines.length < 3) return null;
+    return { ssid: lines[0], password: lines[1], phoneIp: lines[2] };
 }
 
 function saveConfig(cfg) {
     var data = cfg.ssid + "\n" + cfg.password + "\n" + cfg.phoneIp;
-    storage.write(CONFIG_PATH, data, "write"); // "write": default e' append!
+    storage.write(pathOf(CONFIG_FILE), data, "write"); // "write": the default is append!
 }
 
-// L'ultimo ottetto a '.1' e' la convenzione quasi universale per il
-// gateway su hotspot Android/router consumer. Si deduce dal nostro
-// stesso IP (wifi.getIPAddress()), non c'e' un gatewayIP() in Bruce.
+function loadConfig() {
+    try {
+        return parseConfig(storage.read(pathOf(CONFIG_FILE)));
+    } catch (e) {
+        // normal on the very first run: no file yet
+        // (catch variables must be unique per function on this engine)
+    }
+
+    // Migrate the config an older version left in the LittleFS root,
+    // then delete it so nothing is left behind there.
+    try {
+        var cfg = parseConfig(storage.read(LEGACY_CONFIG_FILE));
+        if (cfg) {
+            saveConfig(cfg);
+            storage.remove(LEGACY_CONFIG_FILE);
+            serial.println("migrated config to " + CONFIG_FILE);
+            return cfg;
+        }
+    } catch (e2) {
+        // no legacy file either
+    }
+    return null;
+}
+
+// The last octet at '.1' is the usual gateway convention on consumer
+// routers, but not on every Android hotspot (seen on a real device:
+// phone on 10.48.104.130). It is only ever a suggestion the user
+// confirms; Bruce has no gatewayIP().
 function guessGatewayFromOwnIp(ip) {
     var parts = ip.split(".");
     if (parts.length !== 4) return null;
     return parts[0] + "." + parts[1] + "." + parts[2] + ".1";
 }
 
-// Prova a raggiungere /gps sull'IP dato. Ritorna true se il telefono
-// risponde (anche 503 "nessun fix ancora" conta: significa che l'host e'
-// quello giusto), false se la connessione fallisce del tutto.
-// httpFetch lancia un'eccezione JS se non si connette per niente - non
-// torna solo ok:false - quindi serve try/catch qui, sempre.
+// Try to reach /gps on the given IP. True if the phone answers (even a 503
+// "no fix yet" counts: the host is the right one), false if the connection
+// fails altogether. httpFetch throws a JS exception when it cannot connect
+// at all, it does not just return ok:false, hence the try/catch.
 function canReachPhone(ip) {
     try {
         wifi.httpFetch("http://" + ip + ":" + PHONE_PORT + "/gps");
@@ -76,12 +123,11 @@ function canReachPhone(ip) {
     }
 }
 
-// Scansiona, fa scegliere l'SSID, chiede la password, si connette,
-// deduce e verifica l'IP del telefono. Ritorna la config se tutto va
-// bene, null se l'utente annulla o qualcosa fallisce (l'errore e' gia'
-// mostrato a schermo da qui dentro).
+// Scan, pick the SSID, ask the password, connect, confirm the phone IP and
+// check the server. Returns the config on success, null if the user cancels
+// or something fails (the error has already been shown on screen).
 function runSetupWizard() {
-    dialog.info("Scansione reti WiFi...");
+    dialog.info("Scanning Wi-Fi networks...");
     var nets = wifi.scan();
 
     var seen = {};
@@ -95,67 +141,62 @@ function runSetupWizard() {
     }
 
     if (ssidList.length === 0) {
-        dialog.error("Nessuna rete trovata. Hotspot del telefono attivo?");
+        dialog.error("No networks found. Is the phone hotspot on?");
         return null;
     }
 
     var chosenSsid = dialog.choice(ssidList);
     if (!chosenSsid) {
-        return null; // annullato
+        return null; // cancelled
     }
 
-    // bare keyboard() non esiste in 1.16.1 (verificato su mqjs_stdlib.c
-    // reale): e' dialog.prompt(title, maxSize, msg), stesso native_keyboard
-    // dentro, solo niente 4o parametro mask - l'arity e' 3 non 4, ma il
-    // motore passa comunque argc reale quindi il 4o true arriva lo stesso.
-    var password = dialog.prompt("Password WiFi", 63, "Password per " + chosenSsid, true);
+    // Bare keyboard() does not exist in 1.16.1 (checked against the real
+    // mqjs_stdlib.c): it is dialog.prompt(title, maxSize, msg, mask).
+    var password = dialog.prompt("Wi-Fi password", 63, "Password for " + chosenSsid, true);
 
-    dialog.info("Connessione a " + chosenSsid + "...");
+    dialog.info("Connecting to " + chosenSsid + "...");
     var connected = wifi.connect(chosenSsid, WIFI_CONNECT_TIMEOUT_S, password);
     if (!connected) {
-        dialog.error("Connessione a " + chosenSsid + " fallita.");
+        dialog.error("Connection to " + chosenSsid + " failed.");
         return null;
     }
 
     var myIp = wifi.getIPAddress();
     var guessedIp = guessGatewayFromOwnIp(myIp);
 
-    // httpFetch non ha un timeout configurabile (verificato sul codice):
-    // se l'IP e' sbagliato e non risponde affatto, la connessione resta
-    // bloccata a lungo e puo' far scattare il watchdog dell'ESP32 (crash
-    // senza nessun errore a schermo - visto su device reale: l'euristica
-    // '.1' non vale per tutti gli hotspot, es. 10.48.104.130). Meglio far
-    // confermare o correggere l'IP all'utente PRIMA di un test di rete
-    // alla cieca, che indovinare e sperare.
+    // httpFetch has no configurable timeout: against an unreachable IP it
+    // can block long enough to trip the ESP32 watchdog (silent crash, no
+    // on-screen error, config never saved). So the user confirms or
+    // corrects the IP BEFORE any blind network test.
     dialog.info(
-        "IP ipotizzato: " + (guessedIp ? guessedIp : "nessuno") +
-        ". Nella prossima schermata confermalo o correggilo " +
-        "(guardalo sull'app del telefono se non sei sicuro).",
-        true // aspetta la pressione, cosi' l'utente legge prima della tastiera
+        "Guessed IP: " + (guessedIp ? guessedIp : "none") +
+        ". On the next screen confirm or correct it " +
+        "(check the phone app if unsure).",
+        true // wait for a key press so the user reads it before the keyboard
     );
 
     var typedIp = dialog.prompt(
-        "IP del telefono",
+        "Phone IP",
         15,
-        guessedIp ? ("Lascia vuoto per " + guessedIp) : "Es: 10.48.104.130"
+        guessedIp ? ("Leave empty for " + guessedIp) : "E.g. 10.48.104.130"
     );
     var phoneIp = typedIp ? typedIp : guessedIp;
 
     if (!phoneIp || phoneIp.split(".").length !== 4) {
-        dialog.error("IP non valido: " + to_string(phoneIp));
+        dialog.error("Invalid IP: " + to_string(phoneIp));
         return null;
     }
 
-    dialog.info("Cerco il server sul telefono (" + phoneIp + ")...");
+    dialog.info("Looking for the server on the phone (" + phoneIp + ")...");
     if (!canReachPhone(phoneIp)) {
         dialog.error(
-            "Telefono non trovato su " + phoneIp +
-            ". App GPS Bridge avviata sul telefono? IP corretto?"
+            "Phone not found on " + phoneIp +
+            ". Is the GPS Bridge app running? Is the IP correct?"
         );
         return null;
     }
 
-    dialog.success("Connesso. Telefono trovato su " + phoneIp + ".");
+    dialog.success("Connected. Phone found on " + phoneIp + ".");
 
     var cfg = { ssid: chosenSsid, password: password, phoneIp: phoneIp };
     saveConfig(cfg);
@@ -168,15 +209,15 @@ function ensureWifi() {
     }
     var ok = wifi.connect(config.ssid, WIFI_CONNECT_TIMEOUT_S, config.password);
     if (!ok) {
-        serial.println("Riconnessione a " + config.ssid + " fallita.");
+        serial.println("Reconnecting to " + config.ssid + " failed.");
     }
     return ok;
 }
 
-// Ritorna {lat, lon, acc, ts, ageMs} se c'e' un fix FRESCO, null se non
-// c'e' ancora (503, normale), e' scaduto (M4: meglio niente riga che una
-// riga con coordinate vecchie), o qualcosa e' andato storto (loggato, non
-// lanciato: un loop non deve fermarsi per un fetch mancato).
+// Returns {lat, lon, acc, ts, ageMs, alt} for a FRESH fix, null if there is
+// none yet (503, normal), if it is stale (better no row than a row with old
+// coordinates) or if something went wrong (logged, not thrown: a loop must
+// not stop because one fetch failed).
 function fetchGps() {
     if (!ensureWifi()) {
         return null;
@@ -187,12 +228,12 @@ function fetchGps() {
     try {
         res = wifi.httpFetch(url);
     } catch (e) {
-        serial.println("telefono non raggiungibile su " + config.phoneIp);
+        serial.println("phone unreachable on " + config.phoneIp);
         return null;
     }
 
     if (res.status === 503) {
-        return null; // nessun fix sul telefono ancora, non e' un errore
+        return null; // no fix on the phone yet, not an error
     }
     if (!res.ok) {
         serial.println("httpFetch " + url + " -> status " + res.status);
@@ -200,8 +241,8 @@ function fetchGps() {
     }
 
     var parts = res.body.split(",");
-    if (parts.length !== 5) {
-        serial.println("risposta malformata: " + res.body);
+    if (parts.length < 5) {
+        serial.println("malformed response: " + res.body);
         return null;
     }
 
@@ -210,31 +251,29 @@ function fetchGps() {
         lon: parse_int(parts[1]),
         acc: parse_int(parts[2]),
         ts: parse_int(parts[3]),
-        ageMs: parse_int(parts[4])
+        ageMs: parse_int(parts[4]),
+        alt: parts.length > 5 ? parse_int(parts[5]) : 0
     };
 
     if (fix.ageMs > STALE_FIX_MS) {
-        serial.println("fix vecchio di " + to_string(fix.ageMs) + "ms, salto il giro");
+        serial.println("fix is " + to_string(fix.ageMs) + "ms old, skipping this round");
         return null;
     }
 
     return fix;
 }
 
-// Formato Wigle (WigleWifi-1.6), lo stesso del wardriving nativo di Bruce
-// (src/modules/gps/wardriving.cpp): il file si carica cosi' com'e' su
-// wigle.net. Un file nuovo per sessione, col nome dal timestamp del primo
-// fix (yymmdd_hhmmss_wardriving.csv): niente file unico che cresce senza
-// limite, e nessun bisogno di rileggere il passato per deduplicare.
-var logPath = null; // creato al primo fix valido, serve l'orario per il nome
+// ---- run log (Wigle format) ----
+
+var logPath = null; // created at the first valid fix: the file name needs its time
 
 function pad2(n) {
     return n < 10 ? "0" + n : "" + n;
 }
 
 // epoch ms -> { date: "YYYY-MM-DD HH:MM:SS", stamp: "yymmdd_hhmmss" } (UTC).
-// Solo aritmetica (civil-from-days di Howard Hinnant): l'ESP32 non ha un
-// orologio, l'unica ora affidabile e' quella del fix del telefono.
+// Plain arithmetic (Howard Hinnant's civil-from-days): the ESP32 has no
+// clock, the only reliable time is the phone's fix time.
 function utcParts(epochMs) {
     var secs = Math.floor(epochMs / 1000);
     var days = Math.floor(secs / 86400);
@@ -259,11 +298,11 @@ function utcParts(epochMs) {
     };
 }
 
-function openSessionLog(fix) {
-    storage.mkdir({ fs: "sd", path: LOG_DIR });
+function openRunLog(fix) {
     var when = utcParts(fix.ts);
-    logPath = { fs: "sd", path: LOG_DIR + "/" + when.stamp + "_wardriving.csv" };
-    storage.write(
+    logPath = pathOf(RUNS_DIR + "/" + when.stamp + ".csv");
+    // storage.write creates the missing parent folders (open with create=true)
+    return storage.write(
         logPath,
         "WigleWifi-1.6,appRelease=wardriving-gps-bridge,model=T-Embed CC1101,release=1,device=ESP32-S3," +
         "display=,board=T-Embed,brand=LilyGo,star=Sol,body=4,subBody=1\n" +
@@ -273,25 +312,29 @@ function openSessionLog(fix) {
     );
 }
 
-// SSID tra virgolette, con le virgolette interne raddoppiate (CSV standard):
-// non serve scartare le virgole come nel vecchio formato.
+// SSID in double quotes, inner quotes doubled (standard CSV): commas in an
+// SSID need no special handling. No replace()/regex on this engine, so
+// split+join.
 function csvQuote(text) {
     return '"' + to_string(text).split('"').join('""') + '"';
 }
 
-// Dedup come in Bruce: set dei MAC visti in QUESTA sessione, svuotato del
-// tutto quando arriva al tetto (heap limitato: meglio qualche doppione
-// dopo lo svuotamento che esaurire la RAM). Chiave = MAC senza ':' (12
-// caratteri invece di 17, meno RAM per chiave).
+// Dedup like stock Bruce: a set of the MACs seen in THIS run, cleared
+// entirely when it reaches the cap (limited heap: better a few duplicates
+// after a clear than running out of RAM). The key is the MAC without ':'
+// (12 chars instead of 17, less RAM per key). Not persisted across runs:
+// every run has its own file, so there is nothing to re-read.
 var seenMacs = {};
 var seenCount = 0;
 
-// Una riga per rete NUOVA (MAC non ancora visto in questa sessione), stesso
-// fix per tutte. Ritorna quante righe ha scritto.
+// One row per NEW network (MAC not seen yet in this run), same fix for all.
+// Returns how many rows it wrote, or -1 if the file cannot be written.
 function logNetworks(nets, fix) {
-    if (!logPath) openSessionLog(fix);
+    if (!logPath && !openRunLog(fix)) {
+        return -1;
+    }
 
-    var when = utcParts(fix.ts + fix.ageMs).date; // ora del telefono ~ adesso
+    var when = utcParts(fix.ts + fix.ageMs).date; // phone time ~ now
     var lines = "";
     var newCount = 0;
     for (var i = 0; i < nets.length; i++) {
@@ -315,16 +358,21 @@ function logNetworks(nets, fix) {
             to_string(ch) + "," +
             to_string(ch === 14 ? 2484 : 2407 + ch * 5) + "," +
             to_string(n.RSSI) + "," +
-            to_string(fix.lat) + "," + to_string(fix.lon) + ",0," +
-            to_string(fix.acc) + ",,,WIFI\n";
+            to_string(fix.lat) + "," + to_string(fix.lon) + "," +
+            to_string(fix.alt) + "," + to_string(fix.acc) + ",,,WIFI\n";
     }
-    if (lines.length > 0) {
-        storage.write(logPath, lines, "append");
+    if (lines.length > 0 && !storage.write(logPath, lines, "append")) {
+        return -1;
     }
     return newCount;
 }
 
-// ---- avvio ----
+// ---- start ----
+
+fsName = pickStorage();
+if (fsName !== "sd") {
+    dialog.info("No SD card found: using internal storage (LittleFS), space is limited.", true);
+}
 
 config = loadConfig();
 if (!config) {
@@ -332,20 +380,19 @@ if (!config) {
 }
 
 if (!config) {
-    serial.println("Setup non completato, script interrotto.");
+    serial.println("Setup not completed, script stopped.");
 } else {
-    serial.println("wardrive.js - telefono su " + config.phoneIp + ":" + PHONE_PORT);
+    serial.println("wardrive.js - phone on " + config.phoneIp + ":" + PHONE_PORT + ", storage: " + fsName);
 
     var totalLogged = 0;
     var stopRequested = false;
+    var failed = false;
 
-    // ESC non veniva mai controllato: lo script restava bloccato nel
-    // loop per sempre, nessun modo di uscire se non spegnendo il
-    // device. Il CSV e' gia' scritto riga per riga ad ogni giro
-    // (storage.write "append" dentro logNetworks), quindi non serve
-    // nessun salvataggio speciale all'uscita: i dati ci sono sempre,
-    // basta interrompere il while in modo pulito.
-    while (!stopRequested) {
+    // The CSV is appended to on every round (storage.write "append" inside
+    // logNetworks), so nothing special is needed on exit: the data is always
+    // there, the while loop just has to end cleanly. ESC is polled twice per
+    // round, otherwise the script would run until the device is switched off.
+    while (!stopRequested && !failed) {
         if (keyboard.getEscPress()) {
             stopRequested = true;
             break;
@@ -354,24 +401,31 @@ if (!config) {
         var fix = fetchGps();
 
         if (!fix) {
-            dialog.info("In attesa di un fix GPS valido...");
-            serial.println("...nessun fix valido, salto lo scan...");
+            dialog.info("Waiting for a valid GPS fix...");
+            serial.println("...no valid fix, skipping the scan...");
+        } else if (fsName === "littlefs" && storage.spaceLittleFS().free < MIN_LITTLEFS_FREE_KB) {
+            dialog.error("Internal storage almost full, stopping.");
+            failed = true;
         } else {
-            // wifi.scan() puo' far cadere la STA per un istante (deciso
-            // in PLAN.md): non serve gestirlo qui, il prossimo
-            // fetchGps() la recupera da solo via ensureWifi().
+            // wifi.scan() can drop the STA connection for a moment (see
+            // PLAN.md): nothing to handle here, the next fetchGps()
+            // reconnects through ensureWifi().
             var nets = wifi.scan();
             var count = logNetworks(nets, fix);
-            totalLogged += count;
-
-            dialog.info(
-                "Reti loggate: " + to_string(totalLogged) +
-                " | ultimo fix " + to_string(fix.ageMs) + "ms fa"
-            );
-            serial.println(
-                "loggate " + to_string(count) + " reti @ " +
-                to_string(fix.lat) + "," + to_string(fix.lon)
-            );
+            if (count < 0) {
+                dialog.error("Cannot write the log file, stopping.");
+                failed = true;
+            } else {
+                totalLogged += count;
+                dialog.info(
+                    "Networks logged: " + to_string(totalLogged) +
+                    " | last fix " + to_string(fix.ageMs) + "ms ago"
+                );
+                serial.println(
+                    "logged " + to_string(count) + " networks @ " +
+                    to_string(fix.lat) + "," + to_string(fix.lon)
+                );
+            }
         }
 
         if (keyboard.getEscPress()) {
@@ -382,11 +436,11 @@ if (!config) {
     }
 
     if (stopRequested) {
-        // wait=true: altrimenti il messaggio sparisce subito, sovrascritto
-        // dal menu Scripts non appena lo script termina.
+        // wait=true: otherwise the message vanishes immediately, overwritten
+        // by the Scripts menu as soon as the script ends.
         dialog.success(
-            "Wardriving fermato. " + to_string(totalLogged) +
-            " reti salvate in " + (logPath ? logPath.path : "(nessun file, mai un fix)") + ".",
+            "Wardriving stopped. " + to_string(totalLogged) +
+            " networks saved in " + (logPath ? logPath.path : "(no file, never got a fix)") + ".",
             true
         );
     }

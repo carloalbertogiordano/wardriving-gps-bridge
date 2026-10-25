@@ -13,9 +13,8 @@ import java.net.NetworkInterface
 import java.util.Locale
 
 /**
- * M0: bottone Start/Stop per LocationService. Nessuna persistenza dello
- * stato tra riavvii dell'Activity: e' solo per validare il GPS puro su
- * GrapheneOS, non ancora l'app finale (quella arriva in M4).
+ * Start/Stop button for LocationService. No state is kept across Activity
+ * restarts: this is a bridge UI, not a full app.
  */
 class MainActivity : Activity() {
 
@@ -40,7 +39,7 @@ class MainActivity : Activity() {
 
         LocationService.onFix = { fix ->
             runOnUiThread {
-                val sourceLabel = if (fix.source == LocationService.Mode.FUSED) "Fused" else "GPS diretto"
+                val sourceLabel = if (fix.source == LocationService.Mode.FUSED) "Fused" else "Plain GPS"
                 statusText.text = String.format(
                     Locale.US, "[$sourceLabel] lat=%.5f lon=%.5f (+-%.0fm)",
                     fix.lat, fix.lon, fix.accuracyMeters
@@ -89,28 +88,28 @@ class MainActivity : Activity() {
         if (fineLocationGranted) {
             startLocationService()
         } else {
-            statusText.text = "Permesso posizione negato: niente da fare senza."
+            statusText.text = "Location permission denied: nothing to do without it."
         }
     }
 
     private fun startLocationService() {
         startForegroundService(Intent(this, LocationService::class.java))
         serviceRunning = true
-        toggleButton.text = "Ferma"
-        statusText.text = "In attesa del primo fix..."
-        serverInfoText.text = "Server su:\n" + localIpAddresses()
+        toggleButton.text = "Stop"
+        statusText.text = "Waiting for the first fix..."
+        serverInfoText.text = "Server at:\n" + localIpAddresses()
             .joinToString("\n") { "http://$it:${LocationService.HTTP_PORT}/gps" }
     }
 
     private fun stopService() {
         stopService(Intent(this, LocationService::class.java))
         serviceRunning = false
-        toggleButton.text = "Avvia"
-        statusText.text = "GPS: fermo"
+        toggleButton.text = "Start"
+        statusText.text = "GPS: stopped"
         serverInfoText.text = ""
     }
 
-    /** Tutti gli IPv4 non-loopback: con l'hotspot attivo di solito ce n'e' uno solo. */
+    /** All non-loopback IPv4 addresses: with the hotspot on there is usually just one. */
     private fun localIpAddresses(): List<String> = try {
         NetworkInterface.getNetworkInterfaces().asSequence()
             .flatMap { it.inetAddresses.asSequence() }

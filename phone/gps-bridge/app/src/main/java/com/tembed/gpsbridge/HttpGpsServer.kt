@@ -10,15 +10,16 @@ import java.nio.charset.StandardCharsets
 import java.util.Locale
 
 /**
- * Server HTTP minimale per Bruce: GET /gps -> testo "lat,lon,acc,ts" letto
- * da LocationService.lastFix. Protocollo deciso nel piano (PLAN.md):
+ * Minimal HTTP server for Bruce: GET /gps -> plain text
+ * "lat,lon,acc,ts,age_ms,alt" read from LocationService.lastFix. Protocol
+ * decided in the plan (PLAN.md):
  *
- * - niente JSON, testo semplice, meno parsing sui due lati
- * - risponde sempre dalla cache, mai una lettura GPS sincrona per richiesta
- * - 503 senza corpo se non c'e' ancora un fix (Bruce controlla res.ok)
+ * - no JSON, plain text, less parsing on both ends
+ * - always answers from the cache, never a synchronous GPS read per request
+ * - 503 with no body when there is no fix yet (Bruce checks res.ok)
  *
- * Solo java.net, nessuna libreria tipo NanoHTTPD: il protocollo e' cosi'
- * semplice che non vale la dipendenza.
+ * Only java.net, no NanoHTTPD-style library: the protocol is so simple the
+ * dependency is not worth it.
  */
 class HttpGpsServer(private val port: Int) {
 
@@ -35,16 +36,16 @@ class HttpGpsServer(private val port: Int) {
             try {
                 val socket = ServerSocket(port)
                 serverSocket = socket
-                Log.i(TAG, "in ascolto su porta $port")
+                Log.i(TAG, "listening on port $port")
                 while (!socket.isClosed) {
                     try {
                         handleClient(socket.accept())
                     } catch (e: Exception) {
-                        if (!socket.isClosed) Log.w(TAG, "errore gestendo una connessione", e)
+                        if (!socket.isClosed) Log.w(TAG, "error handling a connection", e)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "impossibile aprire la porta $port", e)
+                Log.e(TAG, "cannot open port $port", e)
             }
         }.also {
             it.isDaemon = true
@@ -76,37 +77,38 @@ class HttpGpsServer(private val port: Int) {
             }
 
             val fix = LocationService.lastFix
-            // Una riga per richiesta: in standby serve sapere se Bruce
-            // arriva fino a qui (e con che eta' del fix) o se la rete
-            // del telefono e' addormentata prima ancora del server.
-            Log.i(TAG, "GET /gps da ${s.inetAddress?.hostAddress} fixAge=" +
+            // One line per request: in standby we need to know whether Bruce
+            // gets this far (and with what fix age) or whether the phone's
+            // network is asleep before it even reaches the server.
+            Log.i(TAG, "GET /gps from ${s.inetAddress?.hostAddress} fixAge=" +
                 (fix?.let { System.currentTimeMillis() - it.timeMillis } ?: -1) + "ms")
             if (fix == null) {
                 writeResponse(out, 503, "")
                 return
             }
 
-            // ageMillis calcolato qui, non su Bruce: l'orologio dell'ESP32
-            // e' millis() da boot, quello del telefono e' epoch reale, i
-            // due non sono confrontabili. Bruce legge solo ageMillis per
-            // decidere se un fix e' troppo vecchio - mai fix.ts, che resta
-            // solo un riferimento assoluto per il log.
+            // ageMillis is computed here, not on Bruce: the ESP32 clock is
+            // millis() since boot, the phone's is real epoch, the two are not
+            // comparable. Bruce only reads ageMillis to decide whether a fix
+            // is too old - never fix.ts, which stays an absolute reference
+            // for the log.
             val ageMillis = System.currentTimeMillis() - fix.timeMillis
 
-            // Locale.US esplicito, altrimenti "%.6f".format() usa il
-            // locale di sistema del telefono: su locale italiana (o molte
-            // altre) il separatore decimale diventa la virgola, che
-            // spacca il nostro protocollo a virgole in pezzi in piu' -
-            // trovato su device reale, risposta tipo "41,352781,14,..."
-            // invece di "41.352781,...". Bruce la scartava come
-            // malformata (5 campi attesi, ne arrivavano 7), e il fix
-            // restava invisibile anche con un GPS funzionante.
+            // Explicit Locale.US, otherwise "%.6f".format() uses the phone's
+            // system locale: on an Italian locale (or many others) the
+            // decimal separator becomes a comma, which breaks our
+            // comma-separated protocol into extra pieces - found on a real
+            // device, answer like "41,352781,14,..." instead of
+            // "41.352781,...". Bruce rejected it as malformed (5 fields
+            // expected, 7 arrived) and the fix stayed invisible even with a
+            // working GPS.
             //
-            // Niente '\n' finale: il corpo e' esattamente
-            // "lat,lon,acc,ts,age_ms", split(",") lato Bruce senza whitespace.
+            // No trailing '\n': the body is exactly
+            // "lat,lon,acc,ts,age_ms,alt", so split(",") on the Bruce side
+            // meets no whitespace.
             val body = String.format(
-                Locale.US, "%.6f,%.6f,%.0f,%d,%d",
-                fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis, ageMillis
+                Locale.US, "%.6f,%.6f,%.0f,%d,%d,%.1f",
+                fix.lat, fix.lon, fix.accuracyMeters, fix.timeMillis, ageMillis, fix.altitudeMeters
             )
             writeResponse(out, 200, body)
         }

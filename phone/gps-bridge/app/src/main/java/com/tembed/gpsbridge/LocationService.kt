@@ -28,18 +28,18 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 
 /**
- * Due fasi, in ordine:
+ * Two phases, in order:
  *
- * 1. Fused Location (Play Services / microG), se il device ne ha una
- *    implementazione valida — su GrapheneOS, questo significa microG con
- *    il suo versionCode finto per passare il check di disponibilita'.
- *    Da' fix indoor via WiFi/rete, non solo satellite.
- * 2. Fallback a LocationManager.GPS_PROVIDER puro (quello di M0), se Fused
- *    Location non e' disponibile. Solo outdoor, nessun aiuto di rete.
+ * 1. Fused Location (Play Services / microG), if the device has a valid
+ *    implementation. On GrapheneOS that means either microG with its fake
+ *    versionCode (to pass the availability check) or the sandboxed Google
+ *    Play, which GrapheneOS reroutes to the system GNSS anyway.
+ * 2. Fallback to plain LocationManager.GPS_PROVIDER when Fused Location is
+ *    not available. Outdoors only, no network assistance.
  *
- * Qualunque sia la fase attiva, il risultato finisce sempre in
- * `LocationService.lastFix` — M1 legge solo quello, non gli importa quale
- * delle due l'ha prodotto.
+ * Whichever phase is active, the result always ends up in
+ * `LocationService.lastFix`: the HTTP server only reads that and does not
+ * care which phase produced it.
  */
 class LocationService : Service() {
 
@@ -50,6 +50,7 @@ class LocationService : Service() {
         val lon: Double,
         val accuracyMeters: Float,
         val timeMillis: Long,
+        val altitudeMeters: Double,
         val source: Mode
     )
 
@@ -61,12 +62,12 @@ class LocationService : Service() {
         private const val MIN_DISTANCE_M = 0f
         const val HTTP_PORT = 8080
 
-        // Visto su device reale: il flusso di fix si blocca del tutto dopo
-        // una breve raffica (sia in Fused sia in GPS_PROVIDER puro) e non
-        // riparte mai da solo - restava fermo anche 30+ minuti, servizio
-        // vivo ma silenzioso. Non sappiamo se la causa sia nel provider
-        // sandboxed di GrapheneOS o altrove: il watchdog non la risolve,
-        // forza solo una nuova registrazione quando il flusso si ferma.
+        // Seen on a real device: the fix stream stops completely after a
+        // short burst (both with Fused and with plain GPS_PROVIDER) and
+        // never resumes on its own - it stayed silent for 30+ minutes with
+        // the service alive. The cause is unknown (GrapheneOS's sandboxed
+        // provider, or indoor reception): the watchdog does not fix it, it
+        // only forces a fresh registration when the stream stops.
         private const val WATCHDOG_INTERVAL_MS = 15_000L
         private const val STALE_THRESHOLD_MS = 30_000L
 
@@ -92,7 +93,7 @@ class LocationService : Service() {
             val reference = lastFix?.timeMillis ?: serviceStartMillis
             val age = System.currentTimeMillis() - reference
             if (age > STALE_THRESHOLD_MS) {
-                Log.w(TAG, "nessun fix da ${age}ms, ri-registro gli update ($activeMode)")
+                Log.w(TAG, "no fix for ${age}ms, re-registering updates ($activeMode)")
                 reRegisterUpdates()
             }
             watchdogHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
@@ -109,7 +110,7 @@ class LocationService : Service() {
                 startGpsOnlyUpdates()
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException ri-registrando gli update", e)
+            Log.e(TAG, "SecurityException while re-registering updates", e)
         }
     }
 
@@ -118,13 +119,13 @@ class LocationService : Service() {
             onNewLocation(location, Mode.GPS_ONLY)
         }
 
-        @Deprecated("Deprecated in API 29, ma ancora richiamato su alcuni OEM/versioni")
+        @Deprecated("Deprecated in API 29, but still called on some OEMs/versions")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
         override fun onProviderEnabled(provider: String) {
-            Log.d(TAG, "provider abilitato: $provider")
+            Log.d(TAG, "provider enabled: $provider")
         }
         override fun onProviderDisabled(provider: String) {
-            Log.w(TAG, "provider disabilitato: $provider")
+            Log.w(TAG, "provider disabled: $provider")
         }
     }
 
@@ -141,6 +142,7 @@ class LocationService : Service() {
             lon = location.longitude,
             accuracyMeters = location.accuracy,
             timeMillis = location.time,
+            altitudeMeters = if (location.hasAltitude()) location.altitude else 0.0,
             source = source
         )
         lastFix = fix
@@ -161,9 +163,9 @@ class LocationService : Service() {
         activeMode = if (fusedAvailable) Mode.FUSED else Mode.GPS_ONLY
 
         val startupText = if (fusedAvailable) {
-            "Play Services/microG trovato: uso Fused Location (meglio anche indoor)."
+            "Play Services/microG found: using Fused Location (better indoors too)."
         } else {
-            "Play Services/microG non disponibile: uso GPS diretto (serve cielo libero)."
+            "Play Services/microG not available: using plain GPS (needs open sky)."
         }
         Log.i(TAG, startupText)
 
@@ -174,7 +176,7 @@ class LocationService : Service() {
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasFinePermission) {
-            Log.e(TAG, "ACCESS_FINE_LOCATION non concesso, stop del service")
+            Log.e(TAG, "ACCESS_FINE_LOCATION not granted, stopping the service")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -186,16 +188,16 @@ class LocationService : Service() {
                 startGpsOnlyUpdates()
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException richiedendo gli update di posizione", e)
+            Log.e(TAG, "SecurityException while requesting location updates", e)
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Senza wake lock la CPU va in suspend a schermo spento: il
-        // foreground service resta "vivo" ma ne' i callback GNSS ne' il
-        // server HTTP (accept() sul socket) girano finche' qualcosa non
-        // sveglia il telefono. Bruce vede una risposta tardiva/mai e il
-        // fix successivo sembra non arrivare piu'.
+        // Without a wake lock the CPU suspends with the screen off: the
+        // foreground service stays "alive" but neither the GNSS callbacks
+        // nor the HTTP server (accept() on the socket) run until something
+        // wakes the phone. Bruce sees a late or missing answer and the
+        // next fix seems never to arrive.
         if (wakeLock?.isHeld != true) {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gpsbridge:service")
@@ -206,23 +208,23 @@ class LocationService : Service() {
         watchdogHandler.removeCallbacks(watchdogRunnable)
         watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
 
-        // NON START_STICKY: un restart automatico di Android avverrebbe da
-        // background, e da Android 12 un foreground service di tipo
-        // 'location' non puo' avviarsi da background
-        // (ForegroundServiceStartNotAllowedException) - loop di crash
-        // altrimenti. L'utente riavvia col bottone, non il sistema.
+        // NOT START_STICKY: an automatic restart by Android would happen
+        // from the background, and since Android 12 a foreground service of
+        // type 'location' cannot start from the background
+        // (ForegroundServiceStartNotAllowedException) - a crash loop
+        // otherwise. The user restarts with the button, not the system.
         return START_NOT_STICKY
     }
 
     /**
-     * `isGooglePlayServicesAvailable` e' il check ufficiale: ritorna SUCCESS
-     * sia con Play Services vere sia con microG, che si spaccia per una
-     * versione sempre aggiornata apposta per passare questo controllo.
+     * `isGooglePlayServicesAvailable` is the official check: it returns
+     * SUCCESS with real Play Services and with microG, which poses as an
+     * always up-to-date version precisely to pass this check.
      */
     private fun isFusedLocationAvailable(): Boolean {
         val result = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
         if (result != ConnectionResult.SUCCESS) {
-            Log.i(TAG, "GoogleApiAvailability = $result (non SUCCESS), fallback a GPS puro")
+            Log.i(TAG, "GoogleApiAvailability = $result (not SUCCESS), falling back to plain GPS")
         }
         return result == ConnectionResult.SUCCESS
     }
@@ -233,16 +235,15 @@ class LocationService : Service() {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, MIN_TIME_MS).build()
         client.requestLocationUpdates(request, fusedCallback, Looper.getMainLooper())
             .addOnFailureListener { e ->
-                // Senza questo, una richiesta rifiutata resta silenziosa:
-                // 'in attesa del primo fix' per sempre, senza nessun errore
-                // visibile da nessuna parte.
-                Log.e(TAG, "requestLocationUpdates (Fused) rifiutata", e)
+                // Without this a rejected request is silent: "waiting for the
+                // first fix" forever, with no error visible anywhere.
+                Log.e(TAG, "requestLocationUpdates (Fused) rejected", e)
             }
     }
 
     private fun startGpsOnlyUpdates() {
         if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            Log.w(TAG, "GPS_PROVIDER non abilitato nelle impostazioni di sistema")
+            Log.w(TAG, "GPS_PROVIDER is not enabled in the system settings")
         }
         locationManager.requestLocationUpdates(
             LocationManager.GPS_PROVIDER,
@@ -284,7 +285,7 @@ class LocationService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val title = if (mode == Mode.FUSED) "GPS Bridge (Fused)" else "GPS Bridge (GPS diretto)"
+        val title = if (mode == Mode.FUSED) "GPS Bridge (Fused)" else "GPS Bridge (plain GPS)"
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
