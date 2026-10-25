@@ -65,14 +65,16 @@ class RunStore(private val dir: File) {
         val run = openRun(runId, fix)
         var added = 0
         var improved = 0
-        for (net in nets) {
-            val key = net.mac.uppercase(Locale.US)
-            val known = run.sightings[key]
+        for (scanned in nets) {
+            // One canonical spelling, so the key and the written row agree
+            // whatever case the sender used.
+            val net = scanned.copy(mac = scanned.mac.uppercase(Locale.US))
+            val known = run.sightings[net.mac]
             if (known == null) {
-                run.sightings[key] = Sighting(net, fix)
+                run.sightings[net.mac] = Sighting(net, fix)
                 added++
             } else if (net.rssi > known.net.rssi) {
-                run.sightings[key] = Sighting(net, fix)
+                run.sightings[net.mac] = Sighting(net, fix)
                 improved++
             }
         }
