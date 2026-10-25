@@ -15,3 +15,8 @@ captures/
 
 # JS harness (tools/js-harness)
 tools/js-harness/build/
+
+# Release signing: never commit the key or its passwords
+*.jks
+*.keystore
+keystore.properties

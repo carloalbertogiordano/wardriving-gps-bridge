@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  phone:
+    name: Phone app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build debug APK
+        working-directory: phone/gps-bridge
+        run: ./gradlew assembleDebug
+
+  script:
+    name: Bruce script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs the script on the real Bruce interpreter with stubbed hardware:
+      # catches syntax errors and wrong API names for firmware 1.16.1.
+      - name: Run the script in the harness
+        run: |
+          ./tools/js-harness/build.sh
+          ./tools/js-harness/build/mqjs bruce/wardrive.js

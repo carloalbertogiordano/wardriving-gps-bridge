@@ -93,6 +93,30 @@ it was pinned down rather than guessed:
   (Kotlin, Gradle; includes a portable JDK 21 setup for recent Fedora).
 - JS harness: [`tools/js-harness/README.md`](tools/js-harness/README.md).
 
+## Releases
+
+Pushing a tag (`git tag v0.2.0 && git push origin v0.2.0`) runs
+`.github/workflows/release.yml`: it checks the script on the Bruce interpreter,
+builds the signed APK and publishes a GitHub release with
+`gps-bridge-<tag>.apk`, `wardrive.js` (copy it to `/JS_Scripts/` on the
+T-Embed's SD card) and `SHA256SUMS`. `ci.yml` builds and checks every push.
+
+The release APK is signed with a key that is **not** in the repo. Locally it is
+read from `phone/gps-bridge/keystore.properties` and `release.jks`
+(git-ignored); in CI from four repository secrets:
+
+```bash
+cd phone/gps-bridge
+base64 -w0 release.jks | gh secret set SIGNING_KEYSTORE_BASE64
+gh secret set SIGNING_STORE_PASSWORD  --body "$(sed -n 's/^storePassword=//p' keystore.properties)"
+gh secret set SIGNING_KEY_ALIAS       --body "$(sed -n 's/^keyAlias=//p' keystore.properties)"
+gh secret set SIGNING_KEY_PASSWORD    --body "$(sed -n 's/^keyPassword=//p' keystore.properties)"
+```
+
+Back the key up somewhere safe: an update only installs over an existing
+install if it is signed with the same key. A release APK cannot replace a
+debug build on a phone (different signature): uninstall the debug one first.
+
 ## License
 
 GNU General Public License v3.0 or later - see [`LICENSE`](LICENSE).

@@ -3,6 +3,21 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Release signing comes from keystore.properties (local, git-ignored) or, in
+// CI, from environment variables decoded from repository secrets. Without
+// either, the release build is simply left unsigned.
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+if (keystoreFile.exists()) {
+    keystoreFile.withInputStream { keystoreProps.load(it) }
+}
+def signingValue = { String propName, String envName ->
+    keystoreProps.getProperty(propName) ?: System.getenv(envName)
+}
+
+int appVersionCode = (project.findProperty('versionCode') ?: '1').toString().toInteger()
+String appVersionName = (project.findProperty('versionName') ?: '0.1-dev').toString()
+
 android {
     namespace 'com.tembed.gpsbridge'
     compileSdk 34
@@ -11,13 +26,29 @@ android {
         applicationId "com.tembed.gpsbridge"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "0.1-M0"
+        // CI passes the tag and the run number; local builds keep the defaults.
+        versionCode appVersionCode
+        versionName appVersionName
+    }
+
+    signingConfigs {
+        release {
+            def storePath = signingValue('storeFile', 'SIGNING_STORE_FILE')
+            if (storePath) {
+                storeFile rootProject.file(storePath)
+                storePassword signingValue('storePassword', 'SIGNING_STORE_PASSWORD')
+                keyAlias signingValue('keyAlias', 'SIGNING_KEY_ALIAS')
+                keyPassword signingValue('keyPassword', 'SIGNING_KEY_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (signingValue('storeFile', 'SIGNING_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
