@@ -12,10 +12,10 @@ Wi-Fi in a loop.
   LocationManager (plain GPS_PROVIDER,           Bruce JS script (App Store)
   no Play Services needed)                       |- wifi.connect(hotspot)
        |                                         |- loop:
-  Foreground service (caches last fix)           |    wifi.scan() -> nearby networks
-       |                                         |    wifi.httpFetch(IP:port/gps)
-  ServerSocket HTTP :port  <---- STA ------------+    storage.write -> Wigle CSV on SD
-  GET /gps -> text "lat,lon,acc,ts,age_ms,alt"
+  Foreground service: fix history (~2 h)         |    wifi.scan() -> nearby networks
+       |                                         |    POST /scan (the scan, as JSON)
+  ServerSocket HTTP :port  <---- STA ------------+    queue on SD only if the phone
+  POST /scan: position + dedup + Wigle file           is unreachable
 ```
 
 ## Fixed decisions
@@ -48,40 +48,52 @@ Wi-Fi in a loop.
    `age_ms` (`System.currentTimeMillis() - fix time`, computed phone-side on
    every answer), and Bruce uses it as is to decide whether a fix is too old
    (`STALE_FIX_MS`) - it never does the subtraction itself.
-5. **Storage layout**: everything lives in one folder,
-   `/BruceWardriving/PhoneGPS/`, with `config.txt` and a `runs/` folder that
-   gets one file per run, named after the time of its first valid fix
-   (`yymmdd_hhmmss.csv`). The **SD card is preferred**; internal LittleFS is
-   only a fallback (with a warning and a free-space guard) so that logs never
-   litter it. A config left by an older version in the LittleFS root is
-   migrated to the new location and deleted.
-6. **Log format: Wigle** (`WigleWifi-1.6`, the same the stock Bruce wardriving
-   module writes in `/BruceWardriving`), so files upload to wigle.net as they
-   are. A wifi scan round produces one row per network not yet seen in the
-   run, all with the same fix. The SSID goes in double quotes with inner
-   quotes doubled; no `replace()`/regex, which are not guaranteed on this
-   engine.
-7. **Dedup like stock Bruce**: a set of the MACs seen in the current run,
-   cleared when it reaches a cap (`MAX_TRACKED_MACS`) to bound heap usage on
-   the ESP32. Session-only on purpose: each run has its own file, so nothing
-   has to be re-read from the SD at startup. (An earlier attempt to reload
-   the MACs of the old single CSV would read the whole file into RAM.)
-8. **GPS protocol between the two devices, locked after analysing the real
-   code**:
+5. **The phone does position, dedup and storage; the T-Embed only scans.**
+   The ESP32 sends each scan to the phone (`POST /scan`) and keeps nothing,
+   except a small queue file when the phone cannot be reached. The phone has
+   the GPS, the RAM and the battery budget, so it attaches the position,
+   deduplicates by MAC and writes the Wigle file (`WigleWifi-1.6`, the same
+   the stock Bruce module writes, one file per run named after the run's
+   first fix, ready for wigle.net). Because the dedup is on the phone, there
+   is no cap on tracked MACs, and for every MAC it keeps the sighting with the
+   strongest RSSI - the one taken closest to the access point - instead of
+   the first one.
+6. **The T-Embed sends durations, never timestamps.** It has no clock
+   comparable to the phone's (`now()` is millis since boot), so a scan
+   carries `ago`, how long before the request it happened (half of the scan
+   duration for a live scan). The phone keeps about two hours of fix history
+   and looks up the position at `now - ago`; a fix further than 20 s from
+   that moment is not trusted and the request gets a 503 ("no fix"), which
+   the script shows as "waiting for a GPS fix". Same rule for live and queued
+   scans, which is what makes the queue usable.
+7. **Queue instead of loss.** When the phone cannot be reached (hotspot
+   dropped, phone asleep, out of range) the scan goes to
+   `/BruceWardriving/PhoneGPS/spool.txt` with its mid-scan `now()`, and is
+   replayed, a few per round, as soon as the phone answers, with the age
+   recomputed. The SD card is preferred, LittleFS is only a fallback with a
+   free-space guard, and the queue is capped at 128 KB. Entries older than
+   the phone's history, or from before a reboot (negative age), cannot be
+   placed and are dropped. Pressing ESC runs a final sync and reports how
+   many networks the phone holds and how many scans are still queued.
+8. **Storage layout on the T-Embed**: only `/BruceWardriving/PhoneGPS/` with
+   `config.txt` and, when needed, `spool.txt`. A config left by an older
+   version in the LittleFS root is migrated to the new location and deleted.
+9. **Protocol, locked after analysing the real code**:
    - Bruce's `httpFetch()` does `http.setReuse(false)` (seen in
-     `wifi_js.cpp`): no keep-alive, ever, hardcoded in C++. A fixed cost, not
-     optimizable without recompiling.
-   - The real bottleneck is `wifi.scan()` (1-3 s, hardware/driver limit), not
-     the GPS fetch (10-40 ms on a local LAN). Optimizing the protocol does not
-     visibly move the loop, but it is free so we do it anyway:
-     - **Direct IP** in the URL (`http://192.168.x.x:port/gps`), no hostname,
-       skips DNS resolution. Deduced automatically (point 1 above).
-     - **Plain text answer**, not JSON: `"lat,lon,acc,ts,age_ms,alt"`.
-       JSON.parse/stringify exist in the engine (confirmed in `mqjs_stdlib`),
-       but for this payload text parsing is lighter anyway. `alt` is optional
-       for the reader: builds that send five fields still work.
-     - **The phone always answers from cache** (`LocationManager` keeps a
-       value in memory), never a synchronous GPS read per request.
+     `wifi_js.cpp`): no keep-alive, ever. It supports `method` and `body`,
+     which is what makes the POST possible, and it opens the Wi-Fi connect
+     menu by itself if the STA is down, so the script always checks
+     `wifi.connected()` first.
+   - The real bottleneck is `wifi.scan()` (1-3 s, hardware/driver limit).
+     Moving the position lookup to the phone removes the second request per
+     round (the old `GET /gps`), so there is one POST per scan.
+   - **Direct IP** in the URL, no hostname, skips DNS. Request:
+     `POST /scan?run=ID&ago=MS` with
+     `{"n":[{"m":mac,"s":ssid,"a":auth,"c":channel,"r":rssi}, ...]}`.
+     Answer: `200 ok,added,improved,total`, `503` no fix, `400` malformed.
+   - `GET /gps` stays on the phone as a debugging endpoint
+     (`lat,lon,acc,ts,age_ms,alt`) and as the connectivity check of the
+     setup wizard; the script no longer polls it.
 
 ## Why not a native C module?
 
@@ -97,8 +109,8 @@ Stock Bruce already has a native wardriving module
 - The script is a plain file on the SD card, validated offline by the harness
   below; a firmware fork would have to be rebuilt on every Bruce update.
 
-What was borrowed instead is its design: Wigle format, one file per session,
-session-only MAC dedup with a cap.
+What was borrowed instead is its design: the Wigle format, one file per run
+and session-only MAC dedup - moved to the phone, where it needs no cap.
 
 ## Milestones
 
@@ -109,7 +121,8 @@ session-only MAC dedup with a cap.
 | **M2** ✅ | Bruce script: connects to the hotspot, `httpFetch` with direct IP, retry/reconnect if `wifi.scan()` dropped the STA, prints to screen | End to end against M1: the T-Embed polls `/gps` every ~2.2 s (seen in the phone's logcat) |
 | **M3** ✅ | `wifi.scan()` in the loop, every network joined to the current fix, CSV on SD | Done: a real run wrote networks with coordinates to the SD CSV |
 | **M4** | Missing/stale fix (>20 s, phone-side `age_ms`) is not logged, on-screen status (total networks, last fix age) | Implemented; the skip path still has to be seen on the T-Embed with a real stale fix |
-| **M5** | Wigle-format export (one file per run), altitude from the phone, single-folder layout, SD preferred | Passes in the harness (wizard, config, loop, dedup); script is on the T-Embed, first outdoor run still pending |
+| **M5** | Wigle-format export (one file per run), altitude from the phone | Passes in the harness; first outdoor run still pending |
+| **M6** | Phone-side dedup and storage, `POST /scan`, position by `ago`, queue on SD, setup checklist in the app | Harness runs the 503 / unreachable / queue-replay paths; the phone side builds, live test pending |
 
 ## Main risk (updated after real tests)
 

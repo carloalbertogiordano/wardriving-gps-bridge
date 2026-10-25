@@ -17,46 +17,47 @@ without buying a dedicated GPS module.
   LocationManager (pure GNSS) /                    Bruce JS script
   Fused Location when available                      |- wifi.connect(hotspot)
        |                                             |- loop:
-  Foreground service (caches last fix)               |    wifi.scan()  -> nearby APs
-       |                                             |    httpFetch(IP:port/gps)
-  Embedded HTTP server :port   <---- STA ------------+    storage.write -> Wigle CSV on SD
-  GET /gps -> "lat,lon,acc,ts,age_ms,alt"
+  Foreground service: fix history                    |    wifi.scan()  -> nearby APs
+       |                                             |    POST /scan   -> the scan as JSON
+  Embedded HTTP server :port   <---- STA ------------+    queue on SD only if the phone is away
+  POST /scan: position + dedup + Wigle file
 ```
 
-The phone runs a Wi-Fi hotspot and an embedded HTTP server that answers `GET
-/gps` from a cached fix (never a synchronous GPS read per request). The T-Embed
-joins as a client, and in a loop scans Wi-Fi, fetches the current fix, and
-appends one Wigle-format CSV row per new network to the SD card.
+The phone runs a Wi-Fi hotspot and an embedded HTTP server. The T-Embed joins
+as a client, scans Wi-Fi in a loop and posts every scan to the phone. The phone
+attaches the position (looked up in its fix history at the moment of the
+scan), deduplicates by MAC keeping the strongest signal, and writes a Wigle
+file. If the phone cannot be reached, the scans wait in a small queue on the
+T-Embed's SD card and are delivered as soon as it answers again.
 
 ## Components
 
 | Path | What |
 |---|---|
-| `phone/` | Android **Kotlin** app (foreground service, GPS cache, `GET /gps` HTTP server) |
-| `bruce/` | **Bruce JS** script (connect, fetch GPS, scan loop, Wigle CSV logging) |
+| `phone/` | Android **Kotlin** app (foreground service, fix history, HTTP server, dedup and Wigle files) |
+| `bruce/` | **Bruce JS** script (connect, scan loop, send scans to the phone, queue) |
 | `tools/js-harness/` | A standalone **mquickjs** interpreter to validate Bruce scripts *before* flashing them to the device |
 
 ## Status
 
 A working, iteratively-built project (see [`PLAN.md`](PLAN.md) for the full
-design log). Milestones M0–M5 are implemented — phone GPS service + HTTP
-endpoint, Bruce connect/fetch, the scan-and-log loop, stale-fix handling using
-a phone-computed `age_ms`, and Wigle-format logging — with on-device validation
+design log). Milestones M0–M6 are implemented — phone GPS service, HTTP server, the
+scan loop, phone-side dedup with Wigle files and the delivery queue — with on-device validation
 in progress (the HTTP path is verified end to end; the outdoor, screen-off run
 is still pending).
 
-## Files on the T-Embed
+## Files
 
-Everything lives in one folder, on the SD card when there is one (internal
-LittleFS is only a fallback, so it never fills up with logs):
+On the T-Embed, only a config and, when the phone was unreachable, a queue:
 
 ```
-/BruceWardriving/PhoneGPS/config.txt            saved setup (SSID, password, phone IP)
-/BruceWardriving/PhoneGPS/runs/yymmdd_hhmmss.csv  one WigleWifi-1.6 file per run
+/BruceWardriving/PhoneGPS/config.txt   saved setup (SSID, password, phone IP)
+/BruceWardriving/PhoneGPS/spool.txt    scans waiting for the phone (usually absent)
 ```
 
-The files upload to wigle.net as they are. Networks are deduplicated by MAC
-within a run, with a capped table to keep the ESP32's heap bounded.
+On the phone, one `WigleWifi-1.6` file per run in the app's private storage,
+named after the run's first fix (`yymmdd_hhmmss.csv`), uploadable to
+wigle.net as it is.
 
 ## Engineering highlights
 

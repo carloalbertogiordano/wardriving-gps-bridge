@@ -21,12 +21,15 @@ Location.
   phase, shows which one is active in the notification and in the UI, and
   logs to logcat (`tag: LocationService`). It holds a `PARTIAL_WAKE_LOCK`
   while running so the CPU does not suspend with the screen off.
-- `LocationService.lastFix` (companion object) caches the last fix, including
-  its `source` (FUSED or GPS_ONLY) and the altitude. The embedded HTTP server
-  answers Bruce from it, never with a synchronous GPS read per request.
-- `GET /gps` on port 8080 answers `lat,lon,acc,ts,age_ms,alt` (503 with no
-  body when there is no fix yet). One logcat line per request
-  (`tag: HttpGpsServer`) with the fix age.
+- Every fix goes into `FixHistory` (about two hours), so a scan can be placed
+  at the moment it happened, not at the moment it was delivered.
+- `POST /scan?run=ID&ago=MS` on port 8080 takes a scan from the T-Embed,
+  looks the position up at `now - ago`, deduplicates by MAC (strongest RSSI
+  wins) and `RunStore` writes the run as a Wigle file under the app's private
+  `files/runs/`. Answers `ok,added,improved,total`, or 503 when no fix is
+  close enough to the scan time.
+- `GET /gps` returns the last fix as `lat,lon,acc,ts,age_ms,alt`; kept for
+  debugging with curl. One logcat line per request (`tag: HttpGpsServer`).
 
 ## How to build it (tested on Fedora 44)
 

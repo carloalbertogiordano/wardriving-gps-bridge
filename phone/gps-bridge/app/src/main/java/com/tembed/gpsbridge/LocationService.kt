@@ -78,6 +78,11 @@ class LocationService : Service() {
         @Volatile
         var onFix: ((Fix) -> Unit)? = null
 
+        // Created with the service; null while it is not running.
+        @Volatile
+        var runStore: RunStore? = null
+            private set
+
         // The UI reads this to show Start/Stop correctly when it is reopened
         // while the service is already running.
         @Volatile
@@ -96,6 +101,9 @@ class LocationService : Service() {
 
     private val watchdogRunnable = object : Runnable {
         override fun run() {
+            // Also the periodic chance to save the last scans of a run that
+            // ended less than the write interval ago.
+            runStore?.flushIfDirty()
             val reference = lastFix?.timeMillis ?: serviceStartMillis
             val age = System.currentTimeMillis() - reference
             if (age > STALE_THRESHOLD_MS) {
@@ -152,6 +160,7 @@ class LocationService : Service() {
             source = source
         )
         lastFix = fix
+        FixHistory.add(fix)
         Log.d(TAG, "fix [$source]: lat=${fix.lat} lon=${fix.lon} acc=${fix.accuracyMeters}m")
         updateNotification(fix)
         onFix?.invoke(fix)
@@ -161,6 +170,7 @@ class LocationService : Service() {
         super.onCreate()
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         createNotificationChannel()
+        runStore = RunStore(java.io.File(filesDir, "runs"))
         httpServer.start()
         isRunning = true
     }
@@ -265,6 +275,9 @@ class LocationService : Service() {
         isRunning = false
         watchdogHandler.removeCallbacks(watchdogRunnable)
         httpServer.stop()
+        runStore?.flush()
+        runStore = null
+        FixHistory.clear()
         fusedClient?.removeLocationUpdates(fusedCallback)
         locationManager.removeUpdates(gpsListener)
         lastFix = null
@@ -305,7 +318,8 @@ class LocationService : Service() {
 
     private fun updateNotification(fix: Fix) {
         val text = String.format(
-            Locale.US, "lat=%.5f lon=%.5f (+-%.0fm)", fix.lat, fix.lon, fix.accuracyMeters
+            Locale.US, "lat=%.5f lon=%.5f (+-%.0fm) | %d networks",
+            fix.lat, fix.lon, fix.accuracyMeters, runStore?.currentTotal() ?: 0
         )
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(text, fix.source))

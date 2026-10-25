@@ -72,20 +72,35 @@ JSValue native_getEscPress(JSContext *ctx, JSValue *this_val, int argc, JSValue 
     return JS_NewString(ctx, "192.168.43.25");
 }''',
     "native_httpFetch": '''static int fetch_call_count = 0;
+static int scan_call_count = 0;
 JSValue native_httpFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     fetch_call_count++;
+    JSCStringBuf ub;
+    const char *url = argc > 0 ? JS_ToCString(ctx, argv[0], &ub) : "";
     JSValue res = JS_NewObject(ctx);
-    // first call 503 (no fix), from the second on 200 with a fake fix, to
-    // exercise both the "not ready" path and the real parsing.
-    if (fetch_call_count == 1) {
-        JS_SetPropertyStr(ctx, res, "status", JS_NewInt32(ctx, 503));
-        JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(0));
-        JS_SetPropertyStr(ctx, res, "body", JS_NewString(ctx, ""));
-    } else {
-        JS_SetPropertyStr(ctx, res, "status", JS_NewInt32(ctx, 200));
-        JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(1));
-        JS_SetPropertyStr(ctx, res, "body", JS_NewString(ctx, "45.464200,9.191400,8,1729690000000,1500,120.5"));
+    if (url && strstr(url, "/scan")) {
+        // Scripted phone: scan 1 -> no fix yet (503), scans 3-5 -> phone
+        // unreachable (exception, like the real httpFetch), the rest -> ok.
+        // Exercises the three outcomes and the queue replay in one run.
+        scan_call_count++;
+        if (scan_call_count >= 3 && scan_call_count <= 5)
+            return JS_ThrowInternalError(ctx, "stub: phone unreachable");
+        if (scan_call_count == 1) {
+            JS_SetPropertyStr(ctx, res, "status", JS_NewInt32(ctx, 503));
+            JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(0));
+            JS_SetPropertyStr(ctx, res, "body", JS_NewString(ctx, ""));
+        } else {
+            JS_SetPropertyStr(ctx, res, "status", JS_NewInt32(ctx, 200));
+            JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(1));
+            JS_SetPropertyStr(ctx, res, "body", JS_NewString(ctx, "ok,3,0,3"));
+        }
+        printf("[stub] POST scan #%d %s\\n", scan_call_count, url);
+        return res;
     }
+    // GET /gps (setup check): any answer means the phone is reachable
+    JS_SetPropertyStr(ctx, res, "status", JS_NewInt32(ctx, 503));
+    JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(0));
+    JS_SetPropertyStr(ctx, res, "body", JS_NewString(ctx, ""));
     return res;
 }''',
     "native_dialogChoice": '''JSValue native_dialogChoice(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
@@ -97,18 +112,77 @@ JSValue native_httpFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *a
     // prompt, and an empty IP means "accept the suggested one".
     return JS_NewString(ctx, "");
 }''',
-    "native_storageRead": '''JSValue native_storageRead(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    // simulates "no config saved yet" (the real storage.read throws)
-    return JS_ThrowTypeError(ctx, "storageRead: File does not exist (stub)");
+    "native_storageRead": '''#define STUB_FILES 6
+static char stub_paths[STUB_FILES][96];
+static char *stub_data[STUB_FILES];
+static int stub_slot(JSContext *ctx, JSValue arg, int create) {
+    // accepts "path" or { fs, path }; the fs is ignored, one namespace is enough
+    JSCStringBuf pb;
+    JSValue pv = JS_IsString(ctx, arg) ? arg : JS_GetPropertyStr(ctx, arg, "path");
+    const char *path = JS_ToCString(ctx, pv, &pb);
+    if (!path) return -1;
+    int free_slot = -1;
+    for (int i = 0; i < STUB_FILES; i++) {
+        if (stub_data[i] && strcmp(stub_paths[i], path) == 0) return i;
+        if (!stub_data[i] && free_slot < 0) free_slot = i;
+    }
+    if (!create || free_slot < 0) return -1;
+    strncpy(stub_paths[free_slot], path, sizeof(stub_paths[0]) - 1);
+    stub_data[free_slot] = strdup("");
+    return free_slot;
+}
+JSValue native_storageRead(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    // in-memory files: "no config yet" on the first run, real content after
+    // a write (the real storage.read throws when the file does not exist)
+    int i = argc > 0 ? stub_slot(ctx, argv[0], 0) : -1;
+    if (i < 0) return JS_ThrowTypeError(ctx, "storageRead: File does not exist (stub)");
+    return JS_NewString(ctx, stub_data[i]);
 }''',
     "native_storageWrite": '''JSValue native_storageWrite(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    int i = argc > 1 ? stub_slot(ctx, argv[0], 1) : -1;
+    if (i < 0) return JS_NewBool(0);
+    JSCStringBuf db, mb;
+    const char *data = JS_ToCString(ctx, argv[1], &db);
+    const char *mode = argc > 2 ? JS_ToCString(ctx, argv[2], &mb) : "append";
+    if (!data) return JS_NewBool(0);
+    if (mode && mode[0] == 'w') {
+        free(stub_data[i]);
+        stub_data[i] = strdup(data);
+    } else {
+        size_t n = strlen(stub_data[i]) + strlen(data) + 1;
+        char *joined = malloc(n);
+        strcpy(joined, stub_data[i]);
+        strcat(joined, data);
+        free(stub_data[i]);
+        stub_data[i] = joined;
+    }
     return JS_NewBool(1);
+}''',
+    "native_storageRemove": '''JSValue native_storageRemove(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    int i = argc > 0 ? stub_slot(ctx, argv[0], 0) : -1;
+    if (i < 0) return JS_ThrowTypeError(ctx, "storageRemove: File does not exist (stub)");
+    free(stub_data[i]);
+    stub_data[i] = NULL;
+    return JS_NewBool(1);
+}''',
+    "native_now": '''JSValue native_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    // fake millis since boot: advances 2.5 s per call so ages are non-zero
+    static double t = 100000;
+    t += 2500;
+    return JS_NewFloat64(ctx, t);
 }''',
     "native_storageSpaceSDCard": '''JSValue native_storageSpaceSDCard(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "total", JS_NewUint32(ctx, 8 * 1024 * 1024));
     JS_SetPropertyStr(ctx, obj, "used", JS_NewUint32(ctx, 1024));
     JS_SetPropertyStr(ctx, obj, "free", JS_NewUint32(ctx, 8 * 1024 * 1024 - 1024));
+    return obj;
+}''',
+    "native_storageSpaceLittleFS": '''JSValue native_storageSpaceLittleFS(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "total", JS_NewUint32(ctx, 1400));
+    JS_SetPropertyStr(ctx, obj, "used", JS_NewUint32(ctx, 200));
+    JS_SetPropertyStr(ctx, obj, "free", JS_NewUint32(ctx, 1200));
     return obj;
 }''',
     "native_serialPrintln": '''JSValue native_serialPrintln(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
@@ -143,7 +217,7 @@ def main():
         f.write(
             "// Generated by gen_stubs.py - not Bruce code, just stubs to link the\n"
             "// symbols required by its real mqjs_stdlib table.\n"
-            "#include <stddef.h>\n#include <inttypes.h>\n#include <stdio.h>\n"
+            "#include <stddef.h>\n#include <inttypes.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
             '#include "mquickjs.h"\n#include "mquickjs_build.h"\n\n'
         )
         for n in normal:

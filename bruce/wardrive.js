@@ -1,30 +1,36 @@
 // wardrive.js - Bruce JS Interpreter
 //
-// Wardriving with the phone's GPS: connects to the phone's hotspot, polls
-// the GPS Bridge app for the current fix and logs every new Wi-Fi network
-// found by wifi.scan() together with that fix.
+// Wardriving with the phone's GPS: connects to the phone's hotspot, scans
+// Wi-Fi in a loop and sends every scan to the GPS Bridge app, which attaches
+// the position, deduplicates by MAC and keeps the run as a Wigle file.
+//
+// The T-Embed does the radio work only. Position, deduplication and storage
+// live on the phone, which has the RAM and the GPS; nothing but a small queue
+// is written on this side.
 //
 // First run: guided setup (scan, pick the hotspot SSID, password, confirm
 // the phone IP, verify the server answers) and the result is saved, so
 // later runs start straight away.
 //
-// Phone protocol (PLAN.md): GET /gps -> plain text
-// "lat,lon,acc,ts,age_ms,alt" (the trailing alt is optional, older app
-// builds send five fields). 503 with no body = no fix on the phone yet,
-// not an error. age_ms is computed by the phone itself
-// (System.currentTimeMillis() - fix time): Bruce has no clock comparable
-// to the phone's (millis() counts from boot, not epoch), so it must read
-// the age ready-made and never subtract timestamps on its own.
+// Protocol (PLAN.md): POST /scan?run=ID&ago=MS with a JSON body
+// {"n":[{"m":mac,"s":ssid,"a":auth,"c":channel,"r":rssi}, ...]}.
+//   200 "ok,added,improved,total"  stored
+//   503                            the phone has no fix close to the scan time
+//   no answer                      phone unreachable: the scan is queued
+// `ago` is how long before the request the scan happened: the ESP32 has no
+// clock comparable to the phone's (now() is millis since boot), so it only
+// ever sends durations and the phone does the timekeeping.
+//
+// Queue: when the phone cannot be reached the scan goes to a small file and
+// is replayed, with its original age, as soon as the phone answers again.
+// The phone keeps about two hours of position history, so older entries
+// cannot be placed and are dropped.
 //
 // File layout - everything lives in a single folder, preferably on the SD
-// card so LittleFS does not fill up with logs:
+// card so LittleFS does not fill up:
 //
-//   /BruceWardriving/PhoneGPS/config.txt                saved setup
-//   /BruceWardriving/PhoneGPS/runs/<yymmdd_hhmmss>.csv  one Wigle file per run
-//
-// Each run gets its own file named after the time of its first valid fix.
-// The format is the same WigleWifi-1.6 the stock Bruce wardriving module
-// writes, so files upload to wigle.net as they are.
+//   /BruceWardriving/PhoneGPS/config.txt   saved setup
+//   /BruceWardriving/PhoneGPS/spool.txt    scans waiting for the phone (usually absent)
 
 var wifi = require("wifi");
 var dialog = require("dialog");
@@ -33,16 +39,17 @@ var serial = require("serial");
 var keyboard = require("keyboard");
 
 var BASE_DIR = "/BruceWardriving/PhoneGPS";
-var RUNS_DIR = BASE_DIR + "/runs";
 var CONFIG_FILE = BASE_DIR + "/config.txt";
+var SPOOL_FILE = BASE_DIR + "/spool.txt";
 var LEGACY_CONFIG_FILE = "/wardrive_config.txt"; // old LittleFS location
-var MIN_LITTLEFS_FREE_KB = 100; // below this, refuse to log on LittleFS
+var MIN_LITTLEFS_FREE_KB = 100; // below this, refuse to queue on LittleFS
 
 var PHONE_PORT = 8080;
 var WIFI_CONNECT_TIMEOUT_S = 20;
-var LOOP_DELAY_MS = 2000;
-var STALE_FIX_MS = 20000; // older than this, the fix is not trusted
-var MAX_TRACKED_MACS = 1500; // cap of the dedup table, see below
+var LOOP_DELAY_MS = 1000;
+var MAX_SPOOL_BYTES = 128 * 1024; // beyond this, new scans are dropped
+var MAX_REPLAYS_PER_ROUND = 3; // keeps the loop responsive while catching up
+var HISTORY_LIMIT_MS = 7000000; // a bit under the phone's ~2h of fix history
 
 // ---- storage: SD card first, LittleFS only as a fallback ----
 
@@ -214,157 +221,136 @@ function ensureWifi() {
     return ok;
 }
 
-// Returns {lat, lon, acc, ts, ageMs, alt} for a FRESH fix, null if there is
-// none yet (503, normal), if it is stale (better no row than a row with old
-// coordinates) or if something went wrong (logged, not thrown: a loop must
-// not stop because one fetch failed).
-function fetchGps() {
-    if (!ensureWifi()) {
-        return null;
-    }
+// ---- sending scans ----
 
-    var url = "http://" + config.phoneIp + ":" + PHONE_PORT + "/gps";
+// One id per run: the phone starts a new file when it changes. now() is
+// millis since boot, so the random part keeps ids apart across reboots.
+var runId = to_string(now()) + "-" + to_string(Math.floor(Math.random() * 100000));
+
+// Compact JSON of one scan: short keys, one object per network.
+function buildScanBody(nets) {
+    var list = [];
+    for (var i = 0; i < nets.length; i++) {
+        var n = nets[i];
+        list.push({
+            m: to_string(n.MAC),
+            s: to_string(n.SSID),
+            a: to_string(n.encryptionType),
+            c: n.channel,
+            r: n.RSSI
+        });
+    }
+    return JSON.stringify({ n: list });
+}
+
+// POST one scan. Returns {state: "ok", added, improved, total},
+// {state: "nofix"}, {state: "unreachable"} or {state: "error"}.
+// ensureWifi() first: httpFetch opens the Wi-Fi connect menu by itself if the
+// STA is down (wifi.scan() can drop it), which would block the loop.
+function postScan(body, agoMs) {
+    if (!ensureWifi()) {
+        return { state: "unreachable" };
+    }
+    var url = "http://" + config.phoneIp + ":" + PHONE_PORT + "/scan?run=" + runId +
+        "&ago=" + to_string(Math.floor(agoMs));
     var res;
     try {
-        res = wifi.httpFetch(url);
+        res = wifi.httpFetch(url, { method: "POST", body: body });
     } catch (e) {
-        serial.println("phone unreachable on " + config.phoneIp);
-        return null;
+        return { state: "unreachable" };
     }
 
     if (res.status === 503) {
-        return null; // no fix on the phone yet, not an error
+        return { state: "nofix" };
     }
     if (!res.ok) {
-        serial.println("httpFetch " + url + " -> status " + res.status);
-        return null;
+        serial.println("POST " + url + " -> status " + res.status);
+        return { state: "error" };
     }
 
-    var parts = res.body.split(",");
-    if (parts.length < 5) {
-        serial.println("malformed response: " + res.body);
-        return null;
+    var p = res.body.split(",");
+    if (p.length < 4 || p[0] !== "ok") {
+        serial.println("unexpected answer: " + res.body);
+        return { state: "error" };
     }
-
-    var fix = {
-        lat: parse_int(parts[0]),
-        lon: parse_int(parts[1]),
-        acc: parse_int(parts[2]),
-        ts: parse_int(parts[3]),
-        ageMs: parse_int(parts[4]),
-        alt: parts.length > 5 ? parse_int(parts[5]) : 0
-    };
-
-    if (fix.ageMs > STALE_FIX_MS) {
-        serial.println("fix is " + to_string(fix.ageMs) + "ms old, skipping this round");
-        return null;
-    }
-
-    return fix;
-}
-
-// ---- run log (Wigle format) ----
-
-var logPath = null; // created at the first valid fix: the file name needs its time
-
-function pad2(n) {
-    return n < 10 ? "0" + n : "" + n;
-}
-
-// epoch ms -> { date: "YYYY-MM-DD HH:MM:SS", stamp: "yymmdd_hhmmss" } (UTC).
-// Plain arithmetic (Howard Hinnant's civil-from-days): the ESP32 has no
-// clock, the only reliable time is the phone's fix time.
-function utcParts(epochMs) {
-    var secs = Math.floor(epochMs / 1000);
-    var days = Math.floor(secs / 86400);
-    var rem = secs - days * 86400;
-    var z = days + 719468;
-    var era = Math.floor(z / 146097);
-    var doe = z - era * 146097;
-    var yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
-    var y = yoe + era * 400;
-    var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
-    var mp = Math.floor((5 * doy + 2) / 153);
-    var d = doy - Math.floor((153 * mp + 2) / 5) + 1;
-    var m = mp < 10 ? mp + 3 : mp - 9;
-    if (m <= 2) y = y + 1;
-    var hh = Math.floor(rem / 3600);
-    var mi = Math.floor((rem - hh * 3600) / 60);
-    var ss = rem - hh * 3600 - mi * 60;
-    var time = pad2(hh) + ":" + pad2(mi) + ":" + pad2(ss);
     return {
-        date: y + "-" + pad2(m) + "-" + pad2(d) + " " + time,
-        stamp: pad2(y % 100) + pad2(m) + pad2(d) + "_" + pad2(hh) + pad2(mi) + pad2(ss)
+        state: "ok",
+        added: parse_int(p[1]),
+        improved: parse_int(p[2]),
+        total: parse_int(p[3])
     };
 }
 
-function openRunLog(fix) {
-    var when = utcParts(fix.ts);
-    logPath = pathOf(RUNS_DIR + "/" + when.stamp + ".csv");
-    // storage.write creates the missing parent folders (open with create=true)
-    return storage.write(
-        logPath,
-        "WigleWifi-1.6,appRelease=wardriving-gps-bridge,model=T-Embed CC1101,release=1,device=ESP32-S3," +
-        "display=,board=T-Embed,brand=LilyGo,star=Sol,body=4,subBody=1\n" +
-        "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude," +
-        "AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n",
-        "write"
-    );
-}
+// ---- queue for scans the phone could not take ----
 
-// SSID in double quotes, inner quotes doubled (standard CSV): commas in an
-// SSID need no special handling. No replace()/regex on this engine, so
-// split+join.
-function csvQuote(text) {
-    return '"' + to_string(text).split('"').join('""') + '"';
-}
+var queued = 0; // scans waiting in the spool file
+var spoolBytes = 0;
 
-// Dedup like stock Bruce: a set of the MACs seen in THIS run, cleared
-// entirely when it reaches the cap (limited heap: better a few duplicates
-// after a clear than running out of RAM). The key is the MAC without ':'
-// (12 chars instead of 17, less RAM per key). Not persisted across runs:
-// every run has its own file, so there is nothing to re-read.
-var seenMacs = {};
-var seenCount = 0;
-
-// One row per NEW network (MAC not seen yet in this run), same fix for all.
-// Returns how many rows it wrote, or -1 if the file cannot be written.
-function logNetworks(nets, fix) {
-    if (!logPath && !openRunLog(fix)) {
-        return -1;
+function readSpool() {
+    try {
+        return storage.read(pathOf(SPOOL_FILE));
+    } catch (e) {
+        return "";
     }
+}
 
-    var when = utcParts(fix.ts + fix.ageMs).date; // phone time ~ now
-    var lines = "";
-    var newCount = 0;
-    for (var i = 0; i < nets.length; i++) {
-        var n = nets[i];
-        var mac = to_string(n.MAC);
-        var key = mac.split(":").join("");
-        if (seenMacs[key]) continue;
+function loadSpoolState() {
+    var raw = readSpool();
+    spoolBytes = raw.length;
+    queued = raw.length > 0 ? raw.split("\n").length - 1 : 0;
+}
 
-        if (seenCount >= MAX_TRACKED_MACS) {
-            seenMacs = {};
-            seenCount = 0;
+// midMillis = now() at the middle of the scan. The age is recomputed from
+// it at replay time, so it stays right however long the phone stays away.
+function spoolScan(body, midMillis) {
+    var line = to_string(Math.floor(midMillis)) + "|" + body + "\n";
+    if (spoolBytes + line.length > MAX_SPOOL_BYTES) {
+        return false;
+    }
+    if (!storage.write(pathOf(SPOOL_FILE), line, "append")) {
+        return false;
+    }
+    spoolBytes += line.length;
+    queued++;
+    return true;
+}
+
+// Replays up to `max` queued scans, oldest first. Stops at the first
+// unreachable answer and keeps everything not yet delivered. Returns the
+// total on the phone after the last delivery, or -1 if none was delivered.
+function replaySpool(max) {
+    var lines = readSpool().split("\n");
+    var done = 0;
+    var total = -1;
+    while (done < lines.length && done < max) {
+        var line = lines[done];
+        if (line.length === 0) { done++; continue; }
+
+        var sep = line.indexOf("|");
+        var mid = parse_int(line.substring(0, sep));
+        var ago = now() - mid;
+        // Negative age = the device rebooted since (now() restarted from
+        // zero); too old = outside the phone's history. Either way the scan
+        // cannot be placed any more.
+        if (ago >= 0 && ago <= HISTORY_LIMIT_MS) {
+            var r = postScan(line.substring(sep + 1), ago);
+            if (r.state === "unreachable") break;
+            if (r.state === "ok") total = r.total;
         }
-        seenMacs[key] = true;
-        seenCount++;
-        newCount++;
+        done++;
+    }
 
-        var ch = n.channel;
-        lines += mac + "," +
-            csvQuote(n.SSID) + ",[" + to_string(n.encryptionType) + "]," +
-            when + "," +
-            to_string(ch) + "," +
-            to_string(ch === 14 ? 2484 : 2407 + ch * 5) + "," +
-            to_string(n.RSSI) + "," +
-            to_string(fix.lat) + "," + to_string(fix.lon) + "," +
-            to_string(fix.alt) + "," + to_string(fix.acc) + ",,,WIFI\n";
+    var rest = lines.slice(done).join("\n");
+    if (rest.length === 0 || rest === "\n") {
+        storage.remove(pathOf(SPOOL_FILE));
+        spoolBytes = 0;
+        queued = 0;
+    } else {
+        storage.write(pathOf(SPOOL_FILE), rest, "write");
+        spoolBytes = rest.length;
+        queued = rest.split("\n").length - 1;
     }
-    if (lines.length > 0 && !storage.write(logPath, lines, "append")) {
-        return -1;
-    }
-    return newCount;
+    return total;
 }
 
 // ---- start ----
@@ -383,48 +369,59 @@ if (!config) {
     serial.println("Setup not completed, script stopped.");
 } else {
     serial.println("wardrive.js - phone on " + config.phoneIp + ":" + PHONE_PORT + ", storage: " + fsName);
+    loadSpoolState();
 
-    var totalLogged = 0;
+    var phoneTotal = 0; // networks in this run, as last reported by the phone
+    var sentScans = 0;
     var stopRequested = false;
     var failed = false;
 
-    // The CSV is appended to on every round (storage.write "append" inside
-    // logNetworks), so nothing special is needed on exit: the data is always
-    // there, the while loop just has to end cleanly. ESC is polled twice per
-    // round, otherwise the script would run until the device is switched off.
+    // Nothing is held here that would be lost on exit: every scan is either
+    // delivered or sitting in the queue file. ESC is polled twice per round,
+    // otherwise the script would run until the device is switched off.
     while (!stopRequested && !failed) {
         if (keyboard.getEscPress()) {
             stopRequested = true;
             break;
         }
 
-        var fix = fetchGps();
+        if (queued > 0) {
+            var replayed = replaySpool(MAX_REPLAYS_PER_ROUND);
+            if (replayed >= 0) phoneTotal = replayed;
+        }
 
-        if (!fix) {
-            dialog.info("Waiting for a valid GPS fix...");
-            serial.println("...no valid fix, skipping the scan...");
-        } else if (fsName === "littlefs" && storage.spaceLittleFS().free < MIN_LITTLEFS_FREE_KB) {
-            dialog.error("Internal storage almost full, stopping.");
-            failed = true;
+        var t0 = now();
+        var nets = wifi.scan();
+        var t1 = now();
+        var half = (t1 - t0) / 2;
+
+        if (nets.length === 0) {
+            dialog.info("No networks in range...");
         } else {
-            // wifi.scan() can drop the STA connection for a moment (see
-            // PLAN.md): nothing to handle here, the next fetchGps()
-            // reconnects through ensureWifi().
-            var nets = wifi.scan();
-            var count = logNetworks(nets, fix);
-            if (count < 0) {
-                dialog.error("Cannot write the log file, stopping.");
-                failed = true;
-            } else {
-                totalLogged += count;
+            var scanBody = buildScanBody(nets);
+            var r = postScan(scanBody, half);
+
+            if (r.state === "ok") {
+                phoneTotal = r.total;
+                sentScans++;
                 dialog.info(
-                    "Networks logged: " + to_string(totalLogged) +
-                    " | last fix " + to_string(fix.ageMs) + "ms ago"
+                    "Networks: " + to_string(phoneTotal) + " (+" + to_string(r.added) + ")" +
+                    (queued > 0 ? " | queued: " + to_string(queued) : "")
                 );
-                serial.println(
-                    "logged " + to_string(count) + " networks @ " +
-                    to_string(fix.lat) + "," + to_string(fix.lon)
-                );
+                serial.println("sent " + to_string(nets.length) + " networks, +" + to_string(r.added));
+            } else if (r.state === "nofix") {
+                dialog.info("Waiting for a GPS fix on the phone...");
+            } else if (r.state === "unreachable") {
+                if (fsName === "littlefs" && storage.spaceLittleFS().free < MIN_LITTLEFS_FREE_KB) {
+                    dialog.error("Phone unreachable and storage almost full, stopping.");
+                    failed = true;
+                } else if (spoolScan(scanBody, t0 + half)) {
+                    dialog.info("Phone unreachable. Queued scans: " + to_string(queued));
+                } else {
+                    dialog.info("Phone unreachable, queue full: scan dropped.");
+                }
+            } else {
+                dialog.info("Unexpected answer from the phone.");
             }
         }
 
@@ -436,12 +433,30 @@ if (!config) {
     }
 
     if (stopRequested) {
+        // Final sync: deliver whatever is still queued, as many rounds as it
+        // takes, giving up at the first unreachable answer.
+        var guard = 0;
+        while (queued > 0 && guard < 100) {
+            var before = queued;
+            var rest = replaySpool(MAX_REPLAYS_PER_ROUND);
+            if (rest >= 0) phoneTotal = rest;
+            if (queued >= before) break; // no progress: phone still away
+            guard++;
+        }
+
         // wait=true: otherwise the message vanishes immediately, overwritten
         // by the Scripts menu as soon as the script ends.
-        dialog.success(
-            "Wardriving stopped. " + to_string(totalLogged) +
-            " networks saved in " + (logPath ? logPath.path : "(no file, never got a fix)") + ".",
-            true
-        );
+        if (queued > 0) {
+            dialog.warning(
+                "Stopped. " + to_string(phoneTotal) + " networks on the phone, " +
+                to_string(queued) + " scans still queued on this device.",
+                true
+            );
+        } else {
+            dialog.success(
+                "Wardriving stopped. " + to_string(phoneTotal) + " networks saved on the phone.",
+                true
+            );
+        }
     }
 }
