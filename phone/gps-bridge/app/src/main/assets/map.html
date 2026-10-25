@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  #notice {
+    position: absolute; z-index: 1000; left: 8px; right: 8px; bottom: 28px;
+    padding: 8px 10px; border-radius: 6px; background: rgba(255,255,255,.92);
+    font: 13px sans-serif; color: #333; display: none;
+  }
+  .legend { background: rgba(255,255,255,.92); padding: 6px 8px; border-radius: 6px; font: 12px sans-serif; line-height: 18px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="notice">Map tiles could not be loaded. Check that the app is allowed to use the network; the networks are still plotted.</div>
+<script src="leaflet/leaflet.js"></script>
+<script>
+  var map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([0, 0], 2);
+
+  var tileErrors = 0;
+  var tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+  tiles.on('tileerror', function () {
+    if (++tileErrors > 3) document.getElementById('notice').style.display = 'block';
+  });
+
+  var COLORS = { open: '#d9381e', weak: '#e8890c', strong: '#2e7d32', other: '#757575' };
+
+  function groupOf(auth) {
+    if (auth.indexOf('OPEN') === 0) return 'open';
+    if (auth.indexOf('WEP') === 0 || auth === 'WPA_PSK') return 'weak';
+    if (auth.indexOf('WPA2') === 0 || auth.indexOf('WPA3') === 0 || auth.indexOf('WPA_WPA2') === 0) return 'strong';
+    return 'other';
+  }
+
+  // SSIDs come from the air, so they are untrusted text: popups are built
+  // with textContent, never with HTML strings.
+  function popupFor(p) {
+    var box = document.createElement('div');
+    var title = document.createElement('b');
+    title.textContent = p.ssid === '' ? '(hidden network)' : p.ssid;
+    box.appendChild(title);
+    [p.mac, p.auth + ' / ch ' + p.channel, p.rssi + ' dBm', p.time + ' UTC'].forEach(function (line) {
+      box.appendChild(document.createElement('br'));
+      box.appendChild(document.createTextNode(line));
+    });
+    return box;
+  }
+
+  // Called by the app once the page is loaded. The view is centered on the
+  // first network of the run, as it was the first thing discovered.
+  function showPoints(points) {
+    if (points.length === 0) return;
+    map.setView([points[0].lat, points[0].lon], 16);
+    points.forEach(function (p) {
+      L.circleMarker([p.lat, p.lon], {
+        radius: 5, weight: 1, color: '#ffffff',
+        fillColor: COLORS[groupOf(p.auth)], fillOpacity: 0.85
+      }).bindPopup(popupFor(p)).addTo(map);
+    });
+  }
+
+  var legend = L.control({ position: 'topright' });
+  legend.onAdd = function () {
+    var div = L.DomUtil.create('div', 'legend');
+    [['open', 'Open'], ['weak', 'WEP / WPA'], ['strong', 'WPA2 / WPA3'], ['other', 'Other']].forEach(function (e) {
+      var row = document.createElement('div');
+      var dot = document.createElement('i');
+      dot.style.background = COLORS[e[0]];
+      row.appendChild(dot);
+      row.appendChild(document.createTextNode(e[1]));
+      div.appendChild(row);
+    });
+    return div;
+  };
+  legend.addTo(map);
+</script>
+</body>
+</html>

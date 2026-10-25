@@ -24,6 +24,25 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".RunsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".RunActivity"
+            android:exported="false" />
+
+        <!-- Hands saved runs to other apps (share sheet) without exposing the file system. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <service
             android:name=".LocationService"
             android:exported="false"

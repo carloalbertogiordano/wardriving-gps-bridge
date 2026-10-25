@@ -79,6 +79,9 @@ class MainActivity : Activity() {
             }
         }
         batteryButton.setOnClickListener { requestBatteryExemption() }
+        findViewById<Button>(R.id.runsButton).setOnClickListener {
+            startActivity(Intent(this, RunsActivity::class.java))
+        }
 
         toggleButton.setOnClickListener {
             if (!LocationService.isRunning) startLocationService() else stopLocationService()
