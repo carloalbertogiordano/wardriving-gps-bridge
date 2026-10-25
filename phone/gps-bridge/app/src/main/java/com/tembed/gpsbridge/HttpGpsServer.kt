@@ -76,6 +76,11 @@ class HttpGpsServer(private val port: Int) {
             }
 
             val fix = LocationService.lastFix
+            // Una riga per richiesta: in standby serve sapere se Bruce
+            // arriva fino a qui (e con che eta' del fix) o se la rete
+            // del telefono e' addormentata prima ancora del server.
+            Log.i(TAG, "GET /gps da ${s.inetAddress?.hostAddress} fixAge=" +
+                (fix?.let { System.currentTimeMillis() - it.timeMillis } ?: -1) + "ms")
             if (fix == null) {
                 writeResponse(out, 503, "")
                 return

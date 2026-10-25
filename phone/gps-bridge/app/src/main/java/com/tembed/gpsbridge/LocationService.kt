@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import java.util.Locale
 import com.google.android.gms.common.ConnectionResult
@@ -84,6 +85,7 @@ class LocationService : Service() {
 
     private val watchdogHandler = Handler(Looper.getMainLooper())
     private var serviceStartMillis = 0L
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private val watchdogRunnable = object : Runnable {
         override fun run() {
@@ -189,6 +191,17 @@ class LocationService : Service() {
             return START_NOT_STICKY
         }
 
+        // Senza wake lock la CPU va in suspend a schermo spento: il
+        // foreground service resta "vivo" ma ne' i callback GNSS ne' il
+        // server HTTP (accept() sul socket) girano finche' qualcosa non
+        // sveglia il telefono. Bruce vede una risposta tardiva/mai e il
+        // fix successivo sembra non arrivare piu'.
+        if (wakeLock?.isHeld != true) {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gpsbridge:service")
+                .apply { acquire() }
+        }
+
         serviceStartMillis = System.currentTimeMillis()
         watchdogHandler.removeCallbacks(watchdogRunnable)
         watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
@@ -246,6 +259,8 @@ class LocationService : Service() {
         fusedClient?.removeLocationUpdates(fusedCallback)
         locationManager.removeUpdates(gpsListener)
         lastFix = null
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         super.onDestroy()
     }
 
