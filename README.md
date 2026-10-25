@@ -46,12 +46,26 @@ scan loop, phone-side dedup with Wigle files and the delivery queue — with on-
 in progress (the HTTP path is verified end to end; the outdoor, screen-off run
 is still pending).
 
+## Using it on the T-Embed
+
+Run `wardrive.js` from the Scripts menu. Everything is a menu, drawn by Bruce
+itself so it follows the theme chosen in the firmware:
+
+- **Start wardriving** - joins the chosen phone's hotspot, checks GPS Bridge
+  answers, then scans. **ESC stops it** (it may take a few seconds: a scan is
+  in progress) and syncs whatever is still queued.
+- **Phone: ...** - pick one of the paired phones; no password is asked again.
+- **Pair a new phone** - step by step: hotspot on, scan, pick it, password,
+  confirm the IP. Several phones can be paired.
+- **Forget a phone**, **Help**, **Exit**.
+
 ## Files
 
-On the T-Embed, only a config and, when the phone was unreachable, a queue:
+On the T-Embed, only the paired phones and, when the phone was unreachable, a
+queue:
 
 ```
-/BruceWardriving/PhoneGPS/config.txt   saved setup (SSID, password, phone IP)
+/BruceWardriving/PhoneGPS/phones.json  paired phones (SSID, password, IP)
 /BruceWardriving/PhoneGPS/spool.txt    scans waiting for the phone (usually absent)
 ```
 

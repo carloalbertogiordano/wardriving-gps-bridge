@@ -185,6 +185,21 @@ JSValue native_storageRead(JSContext *ctx, JSValue *this_val, int argc, JSValue 
     JS_SetPropertyStr(ctx, obj, "free", JS_NewUint32(ctx, 1200));
     return obj;
 }''',
+    "native_menuShow": '''JSValue native_menuShow(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    // Scripted user: the first menus pick the first entry (Start, pick the
+    // hotspot, Start the run), after that the last one (Exit / Back), so a
+    // whole session from an empty config to the exit runs unattended.
+    static int calls = 0;
+    calls++;
+    JSCStringBuf tb;
+    const char *title = JS_ToCString(ctx, argv[0], &tb);
+    int n = 0;
+    JSValue len = JS_GetPropertyStr(ctx, argv[1], "length");
+    JS_ToInt32(ctx, &n, len);
+    int pick = calls <= 4 ? 0 : n - 1;
+    printf("[stub] menu #%d \\"%s\\" (%d entries) -> %d\\n", calls, title ? title : "", n, pick);
+    return JS_NewInt32(ctx, pick);
+}''',
     "native_serialPrintln": '''JSValue native_serialPrintln(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     for (int i = 0; i < argc; i++) {
         JSCStringBuf sb;

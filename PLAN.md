@@ -82,9 +82,19 @@ Wi-Fi in a loop.
    placed and are dropped. Pressing ESC runs a final sync and reports how
    many networks the phone holds and how many scans are still queued.
 8. **Storage layout on the T-Embed**: only `/BruceWardriving/PhoneGPS/` with
-   `config.txt` and, when needed, `spool.txt`. A config left by an older
-   version in the LittleFS root is migrated to the new location and deleted.
-9. **Protocol, locked after analysing the real code**:
+   `phones.json` (every paired phone: SSID, password, IP) and, when needed,
+   `spool.txt`. The single-phone files of older versions (`config.txt`, or
+   `/wardrive_config.txt` in the LittleFS root) are migrated and deleted.
+   A saved phone's IP is checked against the hotspot's current subnet before
+   any request, because `httpFetch` has no timeout and a stale IP would hang
+   it into the watchdog.
+9. **The T-Embed UI is the firmware's own.** The script is menu driven
+   (`menu.show`, `dialog.*`, `menu.showMainBorderWithTitle`/`printSubtitle`
+   for the run screen), not a custom palette: Bruce's theme colors are not
+   readable from JS, but anything drawn through these helpers, and text drawn
+   after them, inherits them, so the script follows the system theme. State
+   is therefore shown as words, not as colors.
+10. **Protocol, locked after analysing the real code**:
    - Bruce's `httpFetch()` does `http.setReuse(false)` (seen in
      `wifi_js.cpp`): no keep-alive, ever. It supports `method` and `body`,
      which is what makes the POST possible, and it opens the Wi-Fi connect

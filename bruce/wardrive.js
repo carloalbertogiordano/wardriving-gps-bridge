@@ -1,16 +1,20 @@
 // wardrive.js - Bruce JS Interpreter
 //
-// Wardriving with the phone's GPS: connects to the phone's hotspot, scans
-// Wi-Fi in a loop and sends every scan to the GPS Bridge app, which attaches
-// the position, deduplicates by MAC and keeps the run as a Wigle file.
+// Wardriving with the phone's GPS. The script connects to the phone's hotspot,
+// scans Wi-Fi in a loop and sends every scan to the GPS Bridge app, which
+// attaches the position, deduplicates by MAC and keeps the run as a Wigle file.
 //
-// The T-Embed does the radio work only. Position, deduplication and storage
-// live on the phone, which has the RAM and the GPS; nothing but a small queue
-// is written on this side.
+// Everything is driven from a menu, in Bruce's own theme (menu.show, dialogs
+// and the main border come from the firmware, so colors and fonts follow the
+// system theme):
 //
-// First run: guided setup (scan, pick the hotspot SSID, password, confirm
-// the phone IP, verify the server answers) and the result is saved, so
-// later runs start straight away.
+//   Start wardriving      connect to the chosen phone and scan
+//   Phone: <name>         pick one of the paired phones (no password asked)
+//   Pair a new phone      scan, pick the hotspot, password, confirm the IP
+//   Forget a phone        remove a paired phone
+//   Help                  how the whole thing works
+//
+// Several phones can be paired; each remembers its password and IP.
 //
 // Protocol (PLAN.md): POST /scan?run=ID&ago=MS with a JSON body
 // {"n":[{"m":mac,"s":ssid,"a":auth,"c":channel,"r":rssi}, ...]}.
@@ -29,7 +33,7 @@
 // File layout - everything lives in a single folder, preferably on the SD
 // card so LittleFS does not fill up:
 //
-//   /BruceWardriving/PhoneGPS/config.txt   saved setup
+//   /BruceWardriving/PhoneGPS/phones.json  paired phones (SSID, password, IP)
 //   /BruceWardriving/PhoneGPS/spool.txt    scans waiting for the phone (usually absent)
 
 var wifi = require("wifi");
@@ -38,11 +42,13 @@ var storage = require("storage");
 var serial = require("serial");
 var keyboard = require("keyboard");
 var display = require("display");
+var menu = require("menu");
 
 var BASE_DIR = "/BruceWardriving/PhoneGPS";
-var CONFIG_FILE = BASE_DIR + "/config.txt";
+var PHONES_FILE = BASE_DIR + "/phones.json";
+var OLD_CONFIG_FILE = BASE_DIR + "/config.txt"; // single-phone format, 3 lines
 var SPOOL_FILE = BASE_DIR + "/spool.txt";
-var LEGACY_CONFIG_FILE = "/wardrive_config.txt"; // old LittleFS location
+var LEGACY_CONFIG_FILE = "/wardrive_config.txt"; // oldest location, LittleFS root
 var MIN_LITTLEFS_FREE_KB = 100; // below this, refuse to queue on LittleFS
 
 var PHONE_PORT = 8080;
@@ -69,44 +75,79 @@ function pathOf(path) {
     return { fs: fsName, path: path };
 }
 
-// ---- config: read from file, or asked to the user on first run ----
+// ---- paired phones ----
 
-var config = null; // { ssid, password, phoneIp }
+// { current: index of the phone to use, nets: [{ssid, password, phoneIp}] }
+var store = { current: -1, nets: [] };
 
-function parseConfig(raw) {
-    var lines = raw.split("\n");
-    if (lines.length < 3) return null;
-    return { ssid: lines[0], password: lines[1], phoneIp: lines[2] };
-}
-
-function saveConfig(cfg) {
-    var data = cfg.ssid + "\n" + cfg.password + "\n" + cfg.phoneIp;
-    storage.write(pathOf(CONFIG_FILE), data, "write"); // "write": the default is append!
-}
-
-function loadConfig() {
+// New format is JSON; the older single-phone files were three plain lines.
+function parseStore(raw) {
+    var data = null;
     try {
-        return parseConfig(storage.read(pathOf(CONFIG_FILE)));
+        data = JSON.parse(raw);
     } catch (e) {
-        // normal on the very first run: no file yet
-        // (catch variables must be unique per function on this engine)
+        data = null; // not JSON: maybe the old three-line format
     }
+    if (data && data.nets) return data;
 
-    // Migrate the config an older version left in the LittleFS root,
-    // then delete it so nothing is left behind there.
-    try {
-        var cfg = parseConfig(storage.read(LEGACY_CONFIG_FILE));
-        if (cfg) {
-            saveConfig(cfg);
-            storage.remove(LEGACY_CONFIG_FILE);
-            serial.println("migrated config to " + CONFIG_FILE);
-            return cfg;
-        }
-    } catch (e2) {
-        // no legacy file either
+    var lines = raw.split("\n");
+    if (lines.length >= 3 && lines[0].length > 0) {
+        return { current: 0, nets: [{ ssid: lines[0], password: lines[1], phoneIp: lines[2] }] };
     }
     return null;
 }
+
+function saveStore() {
+    // "write": the default is append!
+    return storage.write(pathOf(PHONES_FILE), JSON.stringify(store), "write");
+}
+
+function readFileOrNull(file) {
+    try {
+        return storage.read(file);
+    } catch (e) {
+        return null; // no such file
+    }
+}
+
+function loadStore() {
+    var raw = readFileOrNull(pathOf(PHONES_FILE));
+    if (raw !== null) {
+        var loaded = parseStore(raw);
+        if (loaded) store = loaded;
+        return;
+    }
+
+    // Older versions kept one phone elsewhere: migrate it, then delete the
+    // old file so nothing is left behind.
+    var olderSd = readFileOrNull(pathOf(OLD_CONFIG_FILE));
+    var olderLfs = readFileOrNull(LEGACY_CONFIG_FILE);
+    var older = olderSd !== null ? olderSd : olderLfs;
+    var migrated = older !== null ? parseStore(older) : null;
+    if (migrated) {
+        store = migrated;
+        saveStore();
+        if (olderSd !== null) storage.remove(pathOf(OLD_CONFIG_FILE));
+        if (olderLfs !== null) storage.remove(LEGACY_CONFIG_FILE);
+        serial.println("migrated the saved phone to " + PHONES_FILE);
+    }
+}
+
+function selectedPhone() {
+    if (store.current >= 0 && store.current < store.nets.length) return store.nets[store.current];
+    return null;
+}
+
+function findPhone(ssid) {
+    for (var i = 0; i < store.nets.length; i++) {
+        if (store.nets[i].ssid === ssid) return i;
+    }
+    return -1;
+}
+
+// ---- connection helpers ----
+
+var config = null; // the phone in use during a run: {ssid, password, phoneIp}
 
 // The last octet at '.1' is the usual gateway convention on consumer
 // routers, but not on every Android hotspot (seen on a real device:
@@ -116,6 +157,15 @@ function guessGatewayFromOwnIp(ip) {
     var parts = ip.split(".");
     if (parts.length !== 4) return null;
     return parts[0] + "." + parts[1] + "." + parts[2] + ".1";
+}
+
+function subnetOf(ip) {
+    var parts = ip.split(".");
+    return parts.length === 4 ? parts[0] + "." + parts[1] + "." + parts[2] : "";
+}
+
+function isValidIp(ip) {
+    return !!ip && ip.split(".").length === 4;
 }
 
 // Try to reach /gps on the given IP. True if the phone answers (even a 503
@@ -131,86 +181,6 @@ function canReachPhone(ip) {
     }
 }
 
-// Scan, pick the SSID, ask the password, connect, confirm the phone IP and
-// check the server. Returns the config on success, null if the user cancels
-// or something fails (the error has already been shown on screen).
-function runSetupWizard() {
-    dialog.info("Scanning Wi-Fi networks...");
-    var nets = wifi.scan();
-
-    var seen = {};
-    var ssidList = [];
-    for (var i = 0; i < nets.length; i++) {
-        var ssid = nets[i].SSID;
-        if (ssid && !seen[ssid]) {
-            seen[ssid] = true;
-            ssidList.push(ssid);
-        }
-    }
-
-    if (ssidList.length === 0) {
-        dialog.error("No networks found. Is the phone hotspot on?");
-        return null;
-    }
-
-    var chosenSsid = dialog.choice(ssidList);
-    if (!chosenSsid) {
-        return null; // cancelled
-    }
-
-    // Bare keyboard() does not exist in 1.16.1 (checked against the real
-    // mqjs_stdlib.c): it is dialog.prompt(title, maxSize, msg, mask).
-    var password = dialog.prompt("Wi-Fi password", 63, "Password for " + chosenSsid, true);
-
-    dialog.info("Connecting to " + chosenSsid + "...");
-    var connected = wifi.connect(chosenSsid, WIFI_CONNECT_TIMEOUT_S, password);
-    if (!connected) {
-        dialog.error("Connection to " + chosenSsid + " failed.");
-        return null;
-    }
-
-    var myIp = wifi.getIPAddress();
-    var guessedIp = guessGatewayFromOwnIp(myIp);
-
-    // httpFetch has no configurable timeout: against an unreachable IP it
-    // can block long enough to trip the ESP32 watchdog (silent crash, no
-    // on-screen error, config never saved). So the user confirms or
-    // corrects the IP BEFORE any blind network test.
-    dialog.info(
-        "Guessed IP: " + (guessedIp ? guessedIp : "none") +
-        ". On the next screen confirm or correct it " +
-        "(check the phone app if unsure).",
-        true // wait for a key press so the user reads it before the keyboard
-    );
-
-    var typedIp = dialog.prompt(
-        "Phone IP",
-        15,
-        guessedIp ? ("Leave empty for " + guessedIp) : "E.g. 10.48.104.130"
-    );
-    var phoneIp = typedIp ? typedIp : guessedIp;
-
-    if (!phoneIp || phoneIp.split(".").length !== 4) {
-        dialog.error("Invalid IP: " + to_string(phoneIp));
-        return null;
-    }
-
-    dialog.info("Looking for the server on the phone (" + phoneIp + ")...");
-    if (!canReachPhone(phoneIp)) {
-        dialog.error(
-            "Phone not found on " + phoneIp +
-            ". Is the GPS Bridge app running? Is the IP correct?"
-        );
-        return null;
-    }
-
-    dialog.success("Connected. Phone found on " + phoneIp + ".");
-
-    var cfg = { ssid: chosenSsid, password: password, phoneIp: phoneIp };
-    saveConfig(cfg);
-    return cfg;
-}
-
 function ensureWifi() {
     if (wifi.connected()) {
         return true;
@@ -222,11 +192,191 @@ function ensureWifi() {
     return ok;
 }
 
+// Joins the phone's hotspot. Returns true on success; on failure the user
+// chooses between retrying and going back.
+function joinHotspot(phone) {
+    while (true) {
+        dialog.info("Connecting to " + phone.ssid + "...");
+        if (wifi.connect(phone.ssid, WIFI_CONNECT_TIMEOUT_S, phone.password)) {
+            return true;
+        }
+        var choice = menu.show("Cannot join " + phone.ssid, ["Retry", "Back"]);
+        if (choice !== 0) return false;
+    }
+}
+
+// Asks for the phone's IP. httpFetch has no configurable timeout: against an
+// unreachable IP it can block long enough to trip the ESP32 watchdog (silent
+// crash), so the user confirms or corrects the IP BEFORE any blind network
+// test. Returns the IP or null if the user backs out.
+function askPhoneIp(suggestion) {
+    var typed = dialog.prompt(
+        "Phone IP",
+        15,
+        suggestion ? "Empty = " + suggestion : "E.g. 10.48.104.130"
+    );
+    var ip = typed ? typed : suggestion;
+    if (!isValidIp(ip)) {
+        dialog.error("Not a valid IP: " + to_string(ip), true);
+        return null;
+    }
+    return ip;
+}
+
+// Joins the hotspot and checks the GPS Bridge server answers. Fixes a wrong
+// IP on the spot. Returns true when the phone is ready for a run.
+function connectAndVerify(phone) {
+    if (!joinHotspot(phone)) return false;
+
+    // A saved IP from another subnet would send httpFetch into the void:
+    // ask again instead of risking the watchdog.
+    var myIp = wifi.getIPAddress();
+    if (subnetOf(myIp) !== subnetOf(phone.phoneIp)) {
+        dialog.info("The hotspot changed address. Confirm the phone IP.", true);
+        var fresh = askPhoneIp(guessGatewayFromOwnIp(myIp));
+        if (!fresh) return false;
+        phone.phoneIp = fresh;
+        saveStore();
+    }
+
+    while (true) {
+        dialog.info("Looking for GPS Bridge on " + phone.phoneIp + "...");
+        if (canReachPhone(phone.phoneIp)) return true;
+
+        var choice = menu.show("No answer on " + phone.phoneIp, ["Retry", "Change IP", "Back"]);
+        if (choice === 0) continue;
+        if (choice === 1) {
+            var changed = askPhoneIp(guessGatewayFromOwnIp(myIp));
+            if (changed) {
+                phone.phoneIp = changed;
+                saveStore();
+            }
+            continue;
+        }
+        return false;
+    }
+}
+
+// ---- pairing a phone from scratch ----
+
+var PAIR_HELP =
+    "1. On the phone, turn on the Wi-Fi hotspot.\n" +
+    "2. Open GPS Bridge and tap Start.\n" +
+    "3. Come back here and scan: pick the hotspot's name.\n" +
+    "4. Type its password and confirm the phone's IP.\n\n" +
+    "A paired phone is remembered: next time just pick it.";
+
+// Returns the list of distinct SSIDs seen by a scan.
+function scanSsids() {
+    dialog.info("Scanning Wi-Fi networks...");
+    var nets = wifi.scan();
+    var seen = {};
+    var list = [];
+    for (var i = 0; i < nets.length; i++) {
+        var ssid = nets[i].SSID;
+        if (ssid && !seen[ssid]) {
+            seen[ssid] = true;
+            list.push(ssid);
+        }
+    }
+    return list;
+}
+
+// Pairs a phone and makes it the current one. Returns true when done.
+function pairNewPhone() {
+    dialog.viewText(PAIR_HELP, "Pair a phone");
+
+    var ssid = null;
+    while (ssid === null) {
+        var found = scanSsids();
+        var labels = found.concat(["Scan again", "Back"]);
+        var pick = menu.show("Phone hotspot", labels);
+        if (pick < 0 || pick === labels.length - 1) return false; // back
+        if (pick === labels.length - 2) continue; // scan again
+        ssid = found[pick];
+    }
+
+    // A phone paired before keeps its password: no typing twice.
+    var known = findPhone(ssid);
+    var password = known >= 0 ? store.nets[known].password : "";
+    if (known < 0) {
+        password = dialog.prompt("Wi-Fi password", 63, "Password for " + ssid, true);
+    }
+
+    var phone = { ssid: ssid, password: password, phoneIp: "" };
+    if (!joinHotspot(phone)) return false;
+
+    var guessed = guessGatewayFromOwnIp(wifi.getIPAddress());
+    if (known >= 0 && store.nets[known].phoneIp) guessed = store.nets[known].phoneIp;
+    dialog.info("Next: confirm the phone IP (see GPS Bridge on the phone).", true);
+    var ip = askPhoneIp(guessed);
+    if (!ip) return false;
+    phone.phoneIp = ip;
+
+    dialog.info("Looking for GPS Bridge on " + ip + "...");
+    if (!canReachPhone(ip)) {
+        dialog.error("No answer on " + ip + ". Is GPS Bridge started on the phone?", true);
+        return false;
+    }
+
+    if (known >= 0) {
+        store.nets[known] = phone;
+        store.current = known;
+    } else {
+        store.nets.push(phone);
+        store.current = store.nets.length - 1;
+    }
+    if (!saveStore()) {
+        dialog.error("Paired, but the settings could not be saved.", true);
+    } else {
+        dialog.success("Paired with " + ssid + ".", true);
+    }
+    return true;
+}
+
+// Picks which paired phone to use. No password is asked: it is saved.
+function choosePhone() {
+    var names = [];
+    for (var i = 0; i < store.nets.length; i++) names.push(store.nets[i].ssid);
+    var labels = names.concat(["Pair a new phone", "Back"]);
+    var pick = menu.show("Choose a phone", labels);
+    if (pick < 0 || pick === labels.length - 1) return;
+    if (pick === labels.length - 2) {
+        pairNewPhone();
+        return;
+    }
+    store.current = pick;
+    saveStore();
+}
+
+function forgetPhone() {
+    if (store.nets.length === 0) {
+        dialog.info("No paired phones.", true);
+        return;
+    }
+    var names = [];
+    for (var i = 0; i < store.nets.length; i++) names.push(store.nets[i].ssid);
+    var labels = names.concat(["Back"]);
+    var pick = menu.show("Forget which phone?", labels);
+    if (pick < 0 || pick === labels.length - 1) return;
+
+    var sure = menu.show("Forget " + names[pick] + "?", ["Forget", "Cancel"]);
+    if (sure !== 0) return;
+    store.nets.splice(pick, 1);
+    if (store.current === pick) store.current = store.nets.length > 0 ? 0 : -1;
+    else if (store.current > pick) store.current--;
+    saveStore();
+}
+
 // ---- sending scans ----
 
 // One id per run: the phone starts a new file when it changes. now() is
 // millis since boot, so the random part keeps ids apart across reboots.
-var runId = to_string(now()) + "-" + to_string(Math.floor(Math.random() * 100000));
+var runId = "";
+
+function newRunId() {
+    return to_string(now()) + "-" + to_string(Math.floor(Math.random() * 100000));
+}
 
 // Compact JSON of one scan: short keys, one object per network.
 function buildScanBody(nets) {
@@ -354,81 +504,52 @@ function replaySpool(max) {
     return total;
 }
 
-// ---- status screen ----
+// ---- run screen ----
 
-// The T-Embed screen is small (about 320x170), so the run is shown as one big
-// number with a colored header that doubles as a link indicator, instead of
-// a text dialog redrawn every round. Drawn with plain rectangles and text
-// only: cheap enough for the ESP32 and nothing here needs a sprite.
-var COLOR_OK = display.color(46, 160, 67);
-var COLOR_WAIT = display.color(210, 153, 34);
-var COLOR_AWAY = display.color(218, 54, 51);
-var COLOR_BG = display.color(13, 17, 23);
-var COLOR_TEXT = display.color(230, 237, 243);
-var COLOR_DIM = display.color(125, 133, 144);
-
+// Drawn with the firmware's own helpers: the main border, title and subtitle
+// use the colors of the theme chosen in Bruce, and plain text drawn after
+// them inherits the same colors, so the screen follows the system theme.
 // state: "ok" | "nofix" | "away" | "empty"
 function drawStatus(state, total, added, queuedCount) {
-    var w = display.width() || 320;
     var h = display.height() || 170;
-    var headerColor = state === "ok" || state === "empty" ? COLOR_OK :
-        state === "nofix" ? COLOR_WAIT : COLOR_AWAY;
-    var label = state === "ok" ? "GPS FIX OK" :
-        state === "empty" ? "NO NETWORKS HERE" :
-        state === "nofix" ? "WAITING FOR GPS FIX" : "PHONE UNREACHABLE";
+    var label = state === "ok" ? "GPS fix OK" :
+        state === "empty" ? "No networks in range" :
+        state === "nofix" ? "Waiting for a GPS fix" : "Phone unreachable";
 
-    display.fill(COLOR_BG);
-    display.drawFillRect(0, 0, w, 24, headerColor);
-    display.setTextAlign(0);
-    display.setTextColor(COLOR_TEXT);
-    display.setTextSize(2);
-    display.drawText(label, 8, 5);
+    menu.showMainBorderWithTitle("Wardriving");
+    menu.printSubtitle(label);
 
-    display.setTextColor(COLOR_TEXT);
-    display.setTextSize(5);
-    display.drawText(to_string(total), 12, 40);
+    display.setTextSize(4);
+    display.setCursor(12, 46);
+    display.print(to_string(total));
 
-    display.setTextColor(COLOR_DIM);
-    display.setTextSize(2);
-    display.drawText("networks", 12, 88);
-    if (added > 0) {
-        display.setTextColor(COLOR_OK);
-        display.drawText("+" + to_string(added), w - 80, 52);
-    }
-
-    display.setTextColor(queuedCount > 0 ? COLOR_WAIT : COLOR_DIM);
     display.setTextSize(1);
-    display.drawText(queuedCount > 0 ? "Queued scans: " + to_string(queuedCount) : "Queue empty", 12, h - 34);
-    display.setTextColor(COLOR_DIM);
-    display.drawText("ESC: stop and sync", 12, h - 18);
+    display.setCursor(12, 82);
+    display.print("networks in this run");
+    display.setCursor(12, 98);
+    display.print("Last scan: +" + to_string(added) + " new");
+    display.setCursor(12, 110);
+    display.print(queuedCount > 0 ? "Queued for the phone: " + to_string(queuedCount) : "Nothing queued");
+    display.setCursor(12, h - 20);
+    display.print("[ESC] stop and sync");
 }
 
-// ---- start ----
+// ---- one run ----
 
-fsName = pickStorage();
-if (fsName !== "sd") {
-    dialog.info("No SD card found: using internal storage (LittleFS), space is limited.", true);
-}
-
-config = loadConfig();
-if (!config) {
-    config = runSetupWizard();
-}
-
-if (!config) {
-    serial.println("Setup not completed, script stopped.");
-} else {
-    serial.println("wardrive.js - phone on " + config.phoneIp + ":" + PHONE_PORT + ", storage: " + fsName);
+function runWardriving(phone) {
+    config = phone;
+    runId = newRunId();
     loadSpoolState();
 
     var phoneTotal = 0; // networks in this run, as last reported by the phone
-    var sentScans = 0;
     var stopRequested = false;
     var failed = false;
 
+    drawStatus("nofix", 0, 0, queued);
+
     // Nothing is held here that would be lost on exit: every scan is either
-    // delivered or sitting in the queue file. ESC is polled twice per round,
-    // otherwise the script would run until the device is switched off.
+    // delivered or sitting in the queue file. ESC is polled twice per round
+    // (a scan itself takes a few seconds, so a press may need a moment).
     while (!stopRequested && !failed) {
         if (keyboard.getEscPress()) {
             stopRequested = true;
@@ -453,22 +574,21 @@ if (!config) {
 
             if (r.state === "ok") {
                 phoneTotal = r.total;
-                sentScans++;
                 drawStatus("ok", phoneTotal, r.added, queued);
                 serial.println("sent " + to_string(nets.length) + " networks, +" + to_string(r.added));
             } else if (r.state === "nofix") {
                 drawStatus("nofix", phoneTotal, 0, queued);
             } else if (r.state === "unreachable") {
                 if (fsName === "littlefs" && storage.spaceLittleFS().free < MIN_LITTLEFS_FREE_KB) {
-                    dialog.error("Phone unreachable and storage almost full, stopping.");
+                    dialog.error("Phone unreachable and storage almost full: stopping.", true);
                     failed = true;
                 } else if (spoolScan(scanBody, t0 + half)) {
                     drawStatus("away", phoneTotal, 0, queued);
                 } else {
-                    dialog.info("Phone unreachable, queue full: scan dropped.");
+                    dialog.warning("Phone unreachable and the queue is full: scan dropped.");
                 }
             } else {
-                dialog.info("Unexpected answer from the phone.");
+                dialog.warning("Unexpected answer from the phone.");
             }
         }
 
@@ -479,31 +599,96 @@ if (!config) {
         delay(LOOP_DELAY_MS);
     }
 
-    if (stopRequested) {
-        // Final sync: deliver whatever is still queued, as many rounds as it
-        // takes, giving up at the first unreachable answer.
-        var guard = 0;
-        while (queued > 0 && guard < 100) {
-            var before = queued;
-            var rest = replaySpool(MAX_REPLAYS_PER_ROUND);
-            if (rest >= 0) phoneTotal = rest;
-            if (queued >= before) break; // no progress: phone still away
-            guard++;
-        }
+    // Final sync: deliver whatever is still queued, as many rounds as it
+    // takes, giving up as soon as a round makes no progress.
+    dialog.info("Stopping: syncing with the phone...");
+    var guard = 0;
+    while (queued > 0 && guard < 100) {
+        var before = queued;
+        var rest = replaySpool(MAX_REPLAYS_PER_ROUND);
+        if (rest >= 0) phoneTotal = rest;
+        if (queued >= before) break; // no progress: phone still away
+        guard++;
+    }
 
-        // wait=true: otherwise the message vanishes immediately, overwritten
-        // by the Scripts menu as soon as the script ends.
-        if (queued > 0) {
-            dialog.warning(
-                "Stopped. " + to_string(phoneTotal) + " networks on the phone, " +
-                to_string(queued) + " scans still queued on this device.",
-                true
-            );
-        } else {
-            dialog.success(
-                "Wardriving stopped. " + to_string(phoneTotal) + " networks saved on the phone.",
-                true
-            );
-        }
+    // wait=true: otherwise the message vanishes immediately.
+    if (queued > 0) {
+        dialog.warning(
+            to_string(phoneTotal) + " networks on the phone. " +
+            to_string(queued) + " scans are still queued on this device.",
+            true
+        );
+    } else {
+        dialog.success(to_string(phoneTotal) + " networks saved on the phone.", true);
     }
 }
+
+// Connects to the chosen phone, confirms, and runs.
+function startWardriving() {
+    var phone = selectedPhone();
+    if (!phone) {
+        dialog.info("No phone paired yet: let's pair one.", true);
+        if (!pairNewPhone()) return;
+        phone = selectedPhone();
+        if (!phone) return;
+    }
+
+    if (!connectAndVerify(phone)) return;
+
+    var ready = menu.show("Ready: " + phone.ssid, ["Start (ESC stops)", "Back"]);
+    if (ready !== 0) return;
+    runWardriving(phone);
+}
+
+// ---- help ----
+
+var HELP =
+    "Your phone supplies the GPS; this device scans Wi-Fi and sends every " +
+    "scan to the GPS Bridge app, which adds the position and keeps the run " +
+    "as a Wigle file.\n\n" +
+    "BEFORE YOU GO\n" +
+    "- Phone: hotspot on, GPS Bridge started, location allowed.\n" +
+    "- Wait for a GPS fix outdoors.\n\n" +
+    "WHILE RUNNING\n" +
+    "- Press ESC to stop. It may take a few seconds, a scan is in progress.\n" +
+    "- If the phone goes out of range, scans are queued on the SD card and " +
+    "delivered when it is back.\n\n" +
+    "AFTER\n" +
+    "- Open GPS Bridge > Saved runs to see the map, share the file or " +
+    "upload it to wigle.net.";
+
+// ---- main menu ----
+
+function mainMenu() {
+    while (true) {
+        var phone = selectedPhone();
+        var options = [
+            "Start wardriving",
+            "Phone: " + (phone ? phone.ssid : "none paired"),
+            "Pair a new phone",
+            "Forget a phone",
+            "Help",
+            "Exit"
+        ];
+        var pick = menu.show("Wardriving", options);
+
+        if (pick === 0) startWardriving();
+        else if (pick === 1) {
+            if (store.nets.length === 0) pairNewPhone();
+            else choosePhone();
+        }
+        else if (pick === 2) pairNewPhone();
+        else if (pick === 3) forgetPhone();
+        else if (pick === 4) dialog.viewText(HELP, "Help");
+        else return; // Exit, or the back key
+    }
+}
+
+// ---- start ----
+
+fsName = pickStorage();
+if (fsName !== "sd") {
+    dialog.warning("No SD card: using internal storage, space is limited.", true);
+}
+loadStore();
+mainMenu();
