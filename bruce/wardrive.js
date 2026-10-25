@@ -37,6 +37,7 @@ var dialog = require("dialog");
 var storage = require("storage");
 var serial = require("serial");
 var keyboard = require("keyboard");
+var display = require("display");
 
 var BASE_DIR = "/BruceWardriving/PhoneGPS";
 var CONFIG_FILE = BASE_DIR + "/config.txt";
@@ -353,6 +354,55 @@ function replaySpool(max) {
     return total;
 }
 
+// ---- status screen ----
+
+// The T-Embed screen is small (about 320x170), so the run is shown as one big
+// number with a colored header that doubles as a link indicator, instead of
+// a text dialog redrawn every round. Drawn with plain rectangles and text
+// only: cheap enough for the ESP32 and nothing here needs a sprite.
+var COLOR_OK = display.color(46, 160, 67);
+var COLOR_WAIT = display.color(210, 153, 34);
+var COLOR_AWAY = display.color(218, 54, 51);
+var COLOR_BG = display.color(13, 17, 23);
+var COLOR_TEXT = display.color(230, 237, 243);
+var COLOR_DIM = display.color(125, 133, 144);
+
+// state: "ok" | "nofix" | "away" | "empty"
+function drawStatus(state, total, added, queuedCount) {
+    var w = display.width() || 320;
+    var h = display.height() || 170;
+    var headerColor = state === "ok" || state === "empty" ? COLOR_OK :
+        state === "nofix" ? COLOR_WAIT : COLOR_AWAY;
+    var label = state === "ok" ? "GPS FIX OK" :
+        state === "empty" ? "NO NETWORKS HERE" :
+        state === "nofix" ? "WAITING FOR GPS FIX" : "PHONE UNREACHABLE";
+
+    display.fill(COLOR_BG);
+    display.drawFillRect(0, 0, w, 24, headerColor);
+    display.setTextAlign(0);
+    display.setTextColor(COLOR_TEXT);
+    display.setTextSize(2);
+    display.drawText(label, 8, 5);
+
+    display.setTextColor(COLOR_TEXT);
+    display.setTextSize(5);
+    display.drawText(to_string(total), 12, 40);
+
+    display.setTextColor(COLOR_DIM);
+    display.setTextSize(2);
+    display.drawText("networks", 12, 88);
+    if (added > 0) {
+        display.setTextColor(COLOR_OK);
+        display.drawText("+" + to_string(added), w - 80, 52);
+    }
+
+    display.setTextColor(queuedCount > 0 ? COLOR_WAIT : COLOR_DIM);
+    display.setTextSize(1);
+    display.drawText(queuedCount > 0 ? "Queued scans: " + to_string(queuedCount) : "Queue empty", 12, h - 34);
+    display.setTextColor(COLOR_DIM);
+    display.drawText("ESC: stop and sync", 12, h - 18);
+}
+
 // ---- start ----
 
 fsName = pickStorage();
@@ -396,7 +446,7 @@ if (!config) {
         var half = (t1 - t0) / 2;
 
         if (nets.length === 0) {
-            dialog.info("No networks in range...");
+            drawStatus("empty", phoneTotal, 0, queued);
         } else {
             var scanBody = buildScanBody(nets);
             var r = postScan(scanBody, half);
@@ -404,19 +454,16 @@ if (!config) {
             if (r.state === "ok") {
                 phoneTotal = r.total;
                 sentScans++;
-                dialog.info(
-                    "Networks: " + to_string(phoneTotal) + " (+" + to_string(r.added) + ")" +
-                    (queued > 0 ? " | queued: " + to_string(queued) : "")
-                );
+                drawStatus("ok", phoneTotal, r.added, queued);
                 serial.println("sent " + to_string(nets.length) + " networks, +" + to_string(r.added));
             } else if (r.state === "nofix") {
-                dialog.info("Waiting for a GPS fix on the phone...");
+                drawStatus("nofix", phoneTotal, 0, queued);
             } else if (r.state === "unreachable") {
                 if (fsName === "littlefs" && storage.spaceLittleFS().free < MIN_LITTLEFS_FREE_KB) {
                     dialog.error("Phone unreachable and storage almost full, stopping.");
                     failed = true;
                 } else if (spoolScan(scanBody, t0 + half)) {
-                    dialog.info("Phone unreachable. Queued scans: " + to_string(queued));
+                    drawStatus("away", phoneTotal, 0, queued);
                 } else {
                     dialog.info("Phone unreachable, queue full: scan dropped.");
                 }

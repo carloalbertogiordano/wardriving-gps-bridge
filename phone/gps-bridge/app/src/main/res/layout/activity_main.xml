@@ -2,117 +2,184 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/bg"
     android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:padding="20dp">
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Setup"
-            android:textSize="20sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="8dp" />
-
+        <!-- Live status card: what the bridge is doing right now. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
-            <TextView
-                android:id="@+id/locationState"
-                android:layout_width="0dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:elevation="2dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:textSize="15sp" />
-            <Button
-                android:id="@+id/locationButton"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <View
+                    android:id="@+id/stateDot"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:background="@drawable/dot" />
+                <TextView
+                    android:id="@+id/stateLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="Stopped"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/networksCount"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Grant" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/notificationsRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+                android:layout_marginTop="12dp"
+                android:text="0"
+                android:textColor="@color/text_primary"
+                android:textSize="56sp"
+                android:textStyle="bold" />
             <TextView
-                android:id="@+id/notificationsState"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:textSize="15sp" />
-            <Button
-                android:id="@+id/notificationsButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Grant" />
-        </LinearLayout>
+                android:text="networks in this run"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
             <TextView
-                android:id="@+id/batteryState"
-                android:layout_width="0dp"
+                android:id="@+id/statusText"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:textSize="15sp" />
-            <Button
-                android:id="@+id/batteryButton"
-                android:layout_width="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="GPS: stopped"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+            <TextView
+                android:id="@+id/serverInfoText"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Allow" />
+                android:layout_marginTop="6dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
         </LinearLayout>
-
-        <TextView
-            android:id="@+id/setupHint"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textSize="13sp"
-            android:layout_marginTop="8dp" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="GPS: stopped"
-            android:textSize="18sp"
-            android:gravity="center"
-            android:layout_marginTop="32dp"
-            android:layout_marginBottom="16dp" />
 
         <Button
             android:id="@+id/toggleButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:text="Start" />
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_button_start"
+            android:text="Start"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:stateListAnimator="@null" />
 
         <Button
             android:id="@+id/runsButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="16dp"
-            android:text="Saved runs" />
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_button_outline"
+            android:text="Saved runs"
+            android:textColor="@color/text_primary"
+            android:textSize="16sp"
+            android:stateListAnimator="@null" />
 
-        <TextView
-            android:id="@+id/serverInfoText"
+        <!-- Setup card: what has to be granted for the GPS to keep running. -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="14sp"
-            android:gravity="center"
-            android:layout_marginTop="24dp" />
+            android:layout_marginTop="20dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:elevation="2dp">
 
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Setup"
+                android:textColor="@color/text_primary"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:id="@+id/locationState"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp" />
+                <Button
+                    android:id="@+id/locationButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Grant" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/notificationsRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:id="@+id/notificationsState"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp" />
+                <Button
+                    android:id="@+id/notificationsButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Grant" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:id="@+id/batteryState"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp" />
+                <Button
+                    android:id="@+id/batteryButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Allow" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/setupHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>

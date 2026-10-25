@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
+import android.graphics.PorterDuff
 import android.widget.Button
 import android.widget.TextView
 import java.net.Inet4Address
@@ -37,6 +38,9 @@ class MainActivity : Activity() {
     private lateinit var setupHint: TextView
     private lateinit var statusText: TextView
     private lateinit var toggleButton: Button
+    private lateinit var stateDot: View
+    private lateinit var stateLabel: TextView
+    private lateinit var networksCount: TextView
     private lateinit var serverInfoText: TextView
 
     // Set when the system will no longer show the permission dialog: the only
@@ -58,6 +62,9 @@ class MainActivity : Activity() {
         setupHint = findViewById(R.id.setupHint)
         statusText = findViewById(R.id.statusText)
         toggleButton = findViewById(R.id.toggleButton)
+        stateDot = findViewById(R.id.stateDot)
+        stateLabel = findViewById(R.id.stateLabel)
+        networksCount = findViewById(R.id.networksCount)
         serverInfoText = findViewById(R.id.serverInfoText)
 
         locationButton.setOnClickListener {
@@ -94,8 +101,16 @@ class MainActivity : Activity() {
                     Locale.US, "[$sourceLabel] lat=%.5f lon=%.5f (+-%.0fm)",
                     fix.lat, fix.lon, fix.accuracyMeters
                 )
+                showState("GPS fix (+-${fix.accuracyMeters.toInt()} m)", R.color.state_ok)
+                networksCount.text = (LocationService.runStore?.currentTotal() ?: 0).toString()
             }
         }
+    }
+
+    /** Colored dot plus a label: the one-glance answer to "is it working?". */
+    private fun showState(label: String, colorRes: Int) {
+        stateLabel.text = label
+        stateDot.background.mutate().setColorFilter(getColor(colorRes), PorterDuff.Mode.SRC_ATOP)
     }
 
     // The user may have changed a permission in the system settings while the
@@ -148,11 +163,7 @@ class MainActivity : Activity() {
         }
 
         toggleButton.isEnabled = location
-        toggleButton.text = if (LocationService.isRunning) "Stop" else "Start"
-        if (LocationService.isRunning) showServerInfo() else {
-            statusText.text = "GPS: stopped"
-            serverInfoText.text = ""
-        }
+        applyRunningState(LocationService.isRunning)
     }
 
     override fun onRequestPermissionsResult(
@@ -199,16 +210,37 @@ class MainActivity : Activity() {
 
     private fun startLocationService() {
         startForegroundService(Intent(this, LocationService::class.java))
-        statusText.text = "Waiting for the first fix..."
-        toggleButton.text = "Stop"
-        showServerInfo()
+        applyRunningState(true)
     }
 
     private fun stopLocationService() {
         stopService(Intent(this, LocationService::class.java))
-        toggleButton.text = "Start"
-        statusText.text = "GPS: stopped"
-        serverInfoText.text = ""
+        applyRunningState(false)
+    }
+
+    // One place for everything that changes between running and stopped, so
+    // the button, the state label and the texts can never disagree.
+    private fun applyRunningState(running: Boolean) {
+        toggleButton.text = if (running) "Stop" else "Start"
+        toggleButton.setBackgroundResource(
+            if (running) R.drawable.bg_button_stop else R.drawable.bg_button_start
+        )
+        if (running) {
+            val fix = LocationService.lastFix
+            if (fix == null) {
+                showState("Waiting for a GPS fix", R.color.state_warn)
+                statusText.text = "Waiting for the first fix..."
+            } else {
+                showState("GPS fix (+-${fix.accuracyMeters.toInt()} m)", R.color.state_ok)
+            }
+            networksCount.text = (LocationService.runStore?.currentTotal() ?: 0).toString()
+            showServerInfo()
+        } else {
+            showState("Stopped", R.color.state_bad)
+            statusText.text = "GPS: stopped"
+            networksCount.text = "0"
+            serverInfoText.text = ""
+        }
     }
 
     private fun showServerInfo() {
