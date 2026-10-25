@@ -1,49 +1,52 @@
-# GPS Bridge — app telefono (M0)
+# GPS Bridge — phone app
 
-App Android Kotlin per GrapheneOS, a due fasi:
+Kotlin Android app for GrapheneOS, in two phases:
 
-1. **Fused Location** (`play-services-location`), se il device ha
-   un'implementazione valida — su GrapheneOS tipicamente microG, che si
-   spaccia per Play Services sempre aggiornate per passare il check
-   ufficiale. Da' fix anche indoor (WiFi/rete), non solo satellite.
-2. **Fallback a `LocationManager.GPS_PROVIDER`** puro, se la fase 1 non è
-   disponibile. Solo outdoor, nessun aiuto di rete.
+1. **Fused Location** (`play-services-location`), if the device has a valid
+   implementation — on GrapheneOS either microG, which poses as an
+   always up-to-date Play Services to pass the official check, or the
+   sandboxed Google Play (rerouted to the system GNSS, see `PLAN.md`).
+2. **Fallback to plain `LocationManager.GPS_PROVIDER`**, if phase 1 is not
+   available. Outdoors only, no network assistance.
 
-Questo porta dentro AndroidX come dipendenza transitiva — non è più "zero
-dipendenze" come nella primissima versione, scelta deliberata per avere
-Fused Location.
+This pulls AndroidX in as a transitive dependency — it is no longer "zero
+dependencies" like the very first version, a deliberate choice to have Fused
+Location.
 
-## Cosa fa adesso (M0)
+## What it does
 
-- Bottone Avvia/Ferma nella UI.
-- `LocationService` in foreground: al via, controlla con
-  `GoogleApiAvailability` se Fused Location è disponibile, sceglie la fase,
-  mostra quale delle due è attiva in notifica e nella UI, logga su logcat
-  (`tag: LocationService`).
-- `LocationService.lastFix` (companion object) tiene l'ultimo fix in cache,
-  con dentro anche `source` (FUSED o GPS_ONLY): è il punto da cui M1
-  leggerà per rispondere a Bruce senza mai fare una lettura GPS sincrona
-  per richiesta.
+- Start/Stop button in the UI.
+- `LocationService` in the foreground: on start it checks with
+  `GoogleApiAvailability` whether Fused Location is available, picks the
+  phase, shows which one is active in the notification and in the UI, and
+  logs to logcat (`tag: LocationService`). It holds a `PARTIAL_WAKE_LOCK`
+  while running so the CPU does not suspend with the screen off.
+- `LocationService.lastFix` (companion object) caches the last fix, including
+  its `source` (FUSED or GPS_ONLY) and the altitude. The embedded HTTP server
+  answers Bruce from it, never with a synchronous GPS read per request.
+- `GET /gps` on port 8080 answers `lat,lon,acc,ts,age_ms,alt` (503 with no
+  body when there is no fix yet). One logcat line per request
+  (`tag: HttpGpsServer`) with the fix age.
 
-## Come compilarla (testato su Fedora 44)
+## How to build it (tested on Fedora 44)
 
-Fedora 44 ha tolto JDK 17/21 dai repo (solo `java-25-openjdk` e
-`java-latest-openjdk`), e Gradle 8.7 non gira su JDK 25
-(`Unsupported class file major version 69`). Soluzione: un JDK 21 portatile,
-senza toccare i pacchetti di sistema.
+Fedora 44 dropped JDK 17/21 from the repos (only `java-25-openjdk` and
+`java-latest-openjdk`), and Gradle 8.7 does not run on JDK 25
+(`Unsupported class file major version 69`). Solution: a portable JDK 21,
+without touching the system packages.
 
 ```bash
-# 1. JDK 21 portatile (Temurin), non tocca il sistema
+# 1. Portable JDK 21 (Temurin), does not touch the system
 mkdir -p ~/.jdks && cd ~/.jdks
 curl -L -o temurin21.tar.gz \
   "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse?project=jdk"
 tar xzf temurin21.tar.gz && rm temurin21.tar.gz
 
-# 2. Dillo a Gradle, globalmente per il tuo utente
+# 2. Tell Gradle, globally for your user
 mkdir -p ~/.gradle
 echo "org.gradle.java.home=$(ls -d ~/.jdks/jdk-21* | head -1)" >> ~/.gradle/gradle.properties
 
-# 3. Android SDK command-line tools, se non li hai già (es. da Android Studio)
+# 3. Android SDK command-line tools, if you do not have them yet (e.g. from Android Studio)
 mkdir -p ~/Android/Sdk/cmdline-tools && cd ~/Android/Sdk/cmdline-tools
 curl -L -o cmdtools.zip \
   "https://dl.google.com/android/repository/commandlinetools-linux-11479570_latest.zip"
@@ -51,35 +54,37 @@ unzip -q cmdtools.zip && mv cmdline-tools latest && rm cmdtools.zip
 JAVA_HOME=$(ls -d ~/.jdks/jdk-21* | head -1) \
   ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=~/Android/Sdk \
   "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-echo "sdk.dir=$HOME/Android/Sdk" > /path/a/gps-bridge/local.properties
+echo "sdk.dir=$HOME/Android/Sdk" > /path/to/gps-bridge/local.properties
 
 # 4. Build
-cd /path/a/gps-bridge
+cd /path/to/gps-bridge
 ./gradlew assembleDebug
 ```
 
-Se hai già Android Studio installato, il passo 3 è probabilmente superfluo:
-controlla se `~/Android/Sdk` esiste già, in tal caso basta il file
-`local.properties` che ci punta.
+If Android Studio is already installed, step 3 is probably unnecessary: check
+whether `~/Android/Sdk` already exists, in which case the `local.properties`
+file pointing to it is enough.
 
-## Permessi richiesti al primo avvio
+## Permissions asked on first start
 
-- Posizione precisa (`ACCESS_FINE_LOCATION`)
-- Notifiche (`POST_NOTIFICATIONS`, solo Android 13+)
+- Precise location (`ACCESS_FINE_LOCATION`)
+- Notifications (`POST_NOTIFICATIONS`, Android 13+ only)
 
-GrapheneOS li chiede normalmente come qualsiasi app, nessuna configurazione
-speciale.
+GrapheneOS asks for them normally like any app, no special configuration.
+For long runs with the screen off, also set the app's battery usage to
+"Unrestricted" in the system settings.
 
-## Validazione M0
+## Validation
 
-All'aperto, premi Avvia, aspetta il primo fix (può volerci 30s-2min: niente
-rete-assistita senza Play Services). Controlla che:
+Outdoors, press Start and wait for the first fix (it can take 30 s-2 min: no
+network assistance without Play Services). Check that:
 
-- la notifica mostri lat/lon con un'accuratezza sensata (sotto i 20-30m
-  all'aperto);
-- il fix si aggiorni muovendosi;
-- `adb logcat -s LocationService` mostri un fix ogni ~1s mentre ci si muove.
+- the notification shows lat/lon with a sensible accuracy (under 20-30 m
+  outdoors);
+- the fix updates while moving;
+- `adb logcat -s LocationService HttpGpsServer` shows a fix about every second
+  while moving and one `GET /gps` line per request from the T-Embed.
 
-Se il fix non arriva mai o resta impreciso per minuti, fermati qui: significa
-che GPS puro su GrapheneOS non basta per questo progetto, e va ripensata
-l'architettura prima di passare a M1.
+If the fix never arrives or stays imprecise for minutes, stop here: it means
+plain GPS on GrapheneOS is not enough for this project, and the architecture
+has to be rethought.

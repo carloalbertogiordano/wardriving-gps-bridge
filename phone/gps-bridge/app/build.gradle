@@ -32,7 +32,7 @@ android {
 }
 
 dependencies {
-    // Fused Location (Play Services / microG): usato quando disponibile,
-    // con fallback al LocationManager.GPS_PROVIDER puro di M0 se assente.
+    // Fused Location (Play Services / microG): used when available,
+    // with a fallback to the plain LocationManager.GPS_PROVIDER of M0 when absent.
     implementation 'com.google.android.gms:play-services-location:21.3.0'
 }

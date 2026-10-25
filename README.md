@@ -19,30 +19,44 @@ without buying a dedicated GPS module.
        |                                             |- loop:
   Foreground service (caches last fix)               |    wifi.scan()  -> nearby APs
        |                                             |    httpFetch(IP:port/gps)
-  Embedded HTTP server :port   <---- STA ------------+    storage.write -> CSV on SD
-  GET /gps -> "lat,lon,acc,ts,age_ms"
+  Embedded HTTP server :port   <---- STA ------------+    storage.write -> Wigle CSV on SD
+  GET /gps -> "lat,lon,acc,ts,age_ms,alt"
 ```
 
 The phone runs a Wi-Fi hotspot and an embedded HTTP server that answers `GET
 /gps` from a cached fix (never a synchronous GPS read per request). The T-Embed
 joins as a client, and in a loop scans Wi-Fi, fetches the current fix, and
-appends one CSV row per network to the SD card.
+appends one Wigle-format CSV row per new network to the SD card.
 
 ## Components
 
 | Path | What |
 |---|---|
 | `phone/` | Android **Kotlin** app (foreground service, GPS cache, `GET /gps` HTTP server) |
-| `bruce/` | **Bruce JS** scripts (connect, fetch GPS, scan loop, CSV logging) |
+| `bruce/` | **Bruce JS** script (connect, fetch GPS, scan loop, Wigle CSV logging) |
 | `tools/js-harness/` | A standalone **mquickjs** interpreter to validate Bruce scripts *before* flashing them to the device |
 
 ## Status
 
 A working, iteratively-built project (see [`PLAN.md`](PLAN.md) for the full
-design log). Milestones M0–M4 are implemented — phone GPS service + HTTP
-endpoint, Bruce connect/fetch, the scan-and-log loop with SD CSV output, and
-stale-fix handling using a phone-computed `age_ms` — with on-device validation
-in progress. M5 (Wigle-style export / upload) is optional.
+design log). Milestones M0–M5 are implemented — phone GPS service + HTTP
+endpoint, Bruce connect/fetch, the scan-and-log loop, stale-fix handling using
+a phone-computed `age_ms`, and Wigle-format logging — with on-device validation
+in progress (the HTTP path is verified end to end; the outdoor, screen-off run
+is still pending).
+
+## Files on the T-Embed
+
+Everything lives in one folder, on the SD card when there is one (internal
+LittleFS is only a fallback, so it never fills up with logs):
+
+```
+/BruceWardriving/PhoneGPS/config.txt            saved setup (SSID, password, phone IP)
+/BruceWardriving/PhoneGPS/runs/yymmdd_hhmmss.csv  one WigleWifi-1.6 file per run
+```
+
+The files upload to wigle.net as they are. Networks are deduplicated by MAC
+within a run, with a capped table to keep the ESP32's heap bounded.
 
 ## Engineering highlights
 
