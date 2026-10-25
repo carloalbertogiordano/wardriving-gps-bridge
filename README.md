@@ -95,5 +95,10 @@ it was pinned down rather than guessed:
 
 ## License
 
-See [`LICENSE`](LICENSE). The validation harness builds against Bruce
-(AGPL-3.0) by fetching it at build time; it does not redistribute Bruce's code.
+GNU General Public License v3.0 or later - see [`LICENSE`](LICENSE).
+
+No code from Bruce is included: the validation harness builds against Bruce
+(AGPL-3.0) by fetching it at build time and does not redistribute it, and the
+script only runs inside Bruce's interpreter. The Wigle file format and the
+one-file-per-run design are borrowed from Bruce's stock wardriving module, not
+its code.
