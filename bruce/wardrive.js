@@ -27,7 +27,8 @@ var serial = require("serial");
 var keyboard = require("keyboard");
 
 var CONFIG_PATH = "/wardrive_config.txt";
-var LOG_PATH = { fs: "sd", path: "/wardrive_log.csv" };
+var LOG_DIR = "/BruceWardriving"; // stessa cartella del wardriving nativo di Bruce
+var MAX_TRACKED_MACS = 1500; // tetto della tabella di dedup, vedi sotto
 var PHONE_PORT = 8080;
 var WIFI_CONNECT_TIMEOUT_S = 20;
 var LOOP_DELAY_MS = 2000;
@@ -220,51 +221,105 @@ function fetchGps() {
     return fix;
 }
 
-// Niente replace()/regex garantiti su questo motore: split+join togli
-// le virgole dall'SSID senza serve altro, cosi' non spaccano le colonne
-// del CSV.
-function csvSafe(text) {
-    return to_string(text).split(",").join(";");
+// Formato Wigle (WigleWifi-1.6), lo stesso del wardriving nativo di Bruce
+// (src/modules/gps/wardriving.cpp): il file si carica cosi' com'e' su
+// wigle.net. Un file nuovo per sessione, col nome dal timestamp del primo
+// fix (yymmdd_hhmmss_wardriving.csv): niente file unico che cresce senza
+// limite, e nessun bisogno di rileggere il passato per deduplicare.
+var logPath = null; // creato al primo fix valido, serve l'orario per il nome
+
+function pad2(n) {
+    return n < 10 ? "0" + n : "" + n;
 }
 
-function ensureLogHeader() {
-    try {
-        storage.read(LOG_PATH);
-    } catch (e) {
-        storage.write(LOG_PATH, "ts,lat,lon,acc_m,ssid,mac,enc\n", "write");
-    }
+// epoch ms -> { date: "YYYY-MM-DD HH:MM:SS", stamp: "yymmdd_hhmmss" } (UTC).
+// Solo aritmetica (civil-from-days di Howard Hinnant): l'ESP32 non ha un
+// orologio, l'unica ora affidabile e' quella del fix del telefono.
+function utcParts(epochMs) {
+    var secs = Math.floor(epochMs / 1000);
+    var days = Math.floor(secs / 86400);
+    var rem = secs - days * 86400;
+    var z = days + 719468;
+    var era = Math.floor(z / 146097);
+    var doe = z - era * 146097;
+    var yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+    var y = yoe + era * 400;
+    var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    var mp = Math.floor((5 * doy + 2) / 153);
+    var d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+    var m = mp < 10 ? mp + 3 : mp - 9;
+    if (m <= 2) y = y + 1;
+    var hh = Math.floor(rem / 3600);
+    var mi = Math.floor((rem - hh * 3600) / 60);
+    var ss = rem - hh * 3600 - mi * 60;
+    var time = pad2(hh) + ":" + pad2(mi) + ":" + pad2(ss);
+    return {
+        date: y + "-" + pad2(m) + "-" + pad2(d) + " " + time,
+        stamp: pad2(y % 100) + pad2(m) + pad2(d) + "_" + pad2(hh) + pad2(mi) + pad2(ss)
+    };
 }
 
-// MAC gia' loggati in QUESTA esecuzione dello script. Senza questo, ogni
-// giro del loop rilogga le stesse reti viste al giro precedente (ogni
-// 2s, anche stando fermi) - il contatore a schermo sale all'infinito
-// senza che sia successo niente di nuovo. Dedup solo per sessione, non
-// tra run diversi: rileggere tutto il CSV ad ogni avvio per controllare
-// cosa era gia' stato visto in giri precedenti non vale la complessita'
-// per un tool personale come questo.
-var loggedMacs = {};
+function openSessionLog(fix) {
+    storage.mkdir({ fs: "sd", path: LOG_DIR });
+    var when = utcParts(fix.ts);
+    logPath = { fs: "sd", path: LOG_DIR + "/" + when.stamp + "_wardriving.csv" };
+    storage.write(
+        logPath,
+        "WigleWifi-1.6,appRelease=wardriving-gps-bridge,model=T-Embed CC1101,release=1,device=ESP32-S3," +
+        "display=,board=T-Embed,brand=LilyGo,star=Sol,body=4,subBody=1\n" +
+        "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude," +
+        "AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n",
+        "write"
+    );
+}
 
-// Una riga per rete NUOVA trovata (MAC non ancora loggato in questa
-// sessione), stesso fix per tutte. Ritorna quante righe ha scritto.
+// SSID tra virgolette, con le virgolette interne raddoppiate (CSV standard):
+// non serve scartare le virgole come nel vecchio formato.
+function csvQuote(text) {
+    return '"' + to_string(text).split('"').join('""') + '"';
+}
+
+// Dedup come in Bruce: set dei MAC visti in QUESTA sessione, svuotato del
+// tutto quando arriva al tetto (heap limitato: meglio qualche doppione
+// dopo lo svuotamento che esaurire la RAM). Chiave = MAC senza ':' (12
+// caratteri invece di 17, meno RAM per chiave).
+var seenMacs = {};
+var seenCount = 0;
+
+// Una riga per rete NUOVA (MAC non ancora visto in questa sessione), stesso
+// fix per tutte. Ritorna quante righe ha scritto.
 function logNetworks(nets, fix) {
+    if (!logPath) openSessionLog(fix);
+
+    var when = utcParts(fix.ts + fix.ageMs).date; // ora del telefono ~ adesso
     var lines = "";
     var newCount = 0;
     for (var i = 0; i < nets.length; i++) {
         var n = nets[i];
         var mac = to_string(n.MAC);
-        if (loggedMacs[mac]) continue;
-        loggedMacs[mac] = true;
+        var key = mac.split(":").join("");
+        if (seenMacs[key]) continue;
+
+        if (seenCount >= MAX_TRACKED_MACS) {
+            seenMacs = {};
+            seenCount = 0;
+        }
+        seenMacs[key] = true;
+        seenCount++;
         newCount++;
-        lines += to_string(fix.ts) + "," +
-            to_string(fix.lat) + "," +
-            to_string(fix.lon) + "," +
-            to_string(fix.acc) + "," +
-            csvSafe(n.SSID) + "," +
-            mac + "," +
-            to_string(n.encryptionType) + "\n";
+
+        var ch = n.channel;
+        lines += mac + "," +
+            csvQuote(n.SSID) + ",[" + to_string(n.encryptionType) + "]," +
+            when + "," +
+            to_string(ch) + "," +
+            to_string(ch === 14 ? 2484 : 2407 + ch * 5) + "," +
+            to_string(n.RSSI) + "," +
+            to_string(fix.lat) + "," + to_string(fix.lon) + ",0," +
+            to_string(fix.acc) + ",,,WIFI\n";
     }
     if (lines.length > 0) {
-        storage.write(LOG_PATH, lines, "append");
+        storage.write(logPath, lines, "append");
     }
     return newCount;
 }
@@ -280,7 +335,6 @@ if (!config) {
     serial.println("Setup non completato, script interrotto.");
 } else {
     serial.println("wardrive.js - telefono su " + config.phoneIp + ":" + PHONE_PORT);
-    ensureLogHeader();
 
     var totalLogged = 0;
     var stopRequested = false;
@@ -332,7 +386,7 @@ if (!config) {
         // dal menu Scripts non appena lo script termina.
         dialog.success(
             "Wardriving fermato. " + to_string(totalLogged) +
-            " reti salvate in " + LOG_PATH.path + ".",
+            " reti salvate in " + (logPath ? logPath.path : "(nessun file, mai un fix)") + ".",
             true
         );
     }
