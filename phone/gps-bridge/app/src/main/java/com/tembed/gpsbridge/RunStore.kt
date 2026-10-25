@@ -22,8 +22,9 @@ data class ScannedNet(
  *
  * Deduplication happens here, not on the ESP32: the phone has plenty of RAM
  * and can afford the smarter policy of keeping, for every MAC, the sighting
- * with the strongest signal, since that is the one taken closest to the
- * access point.
+ * that places the access point best: the one with the lowest combined
+ * uncertainty of GPS accuracy and signal-strength distance (see
+ * [uncertaintyMeters]).
  *
  * A run is identified by an id the T-Embed picks at start. A new id starts a
  * new file, named after the time of the run's first fix.
@@ -73,7 +74,7 @@ class RunStore(private val dir: File) {
             if (known == null) {
                 run.sightings[net.mac] = Sighting(net, fix)
                 added++
-            } else if (net.rssi > known.net.rssi) {
+            } else if (uncertaintyMeters(net, fix) < uncertaintyMeters(known.net, known.fix)) {
                 run.sightings[net.mac] = Sighting(net, fix)
                 improved++
             }
@@ -100,6 +101,24 @@ class RunStore(private val dir: File) {
     /** Saved runs, newest first. */
     fun listRuns(): List<File> =
         dir.listFiles { f -> f.extension == "csv" }?.sortedByDescending { it.name } ?: emptyList()
+
+    /**
+     * How far from the access point the recorded position can be, in meters:
+     * the GPS accuracy of the fix combined with the distance the signal
+     * strength suggests between phone and access point. Lower is better, and
+     * a sighting replaces the stored one only if it scores lower, so a closer
+     * (stronger) sighting and a more precise fix both count - and neither
+     * wins when it comes with a much worse value of the other.
+     *
+     * The distance is a rough log-distance path loss model (-40 dBm at 1 m,
+     * exponent 3, typical for built-up areas). It is a heuristic to rank two
+     * sightings of the same access point, not a range measurement.
+     */
+    private fun uncertaintyMeters(net: ScannedNet, fix: LocationService.Fix): Double {
+        val distance = Math.pow(10.0, (-40.0 - net.rssi) / 30.0).coerceAtLeast(1.0)
+        val accuracy = fix.accuracyMeters.toDouble().coerceAtLeast(1.0)
+        return Math.hypot(accuracy, distance)
+    }
 
     private fun openRun(runId: String, fix: LocationService.Fix): Run {
         current?.let { if (it.id == runId) return it }

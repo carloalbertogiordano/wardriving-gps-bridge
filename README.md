@@ -26,8 +26,8 @@ without buying a dedicated GPS module.
 The phone runs a Wi-Fi hotspot and an embedded HTTP server. The T-Embed joins
 as a client, scans Wi-Fi in a loop and posts every scan to the phone. The phone
 attaches the position (looked up in its fix history at the moment of the
-scan), deduplicates by MAC keeping the strongest signal, and writes a Wigle
-file. If the phone cannot be reached, the scans wait in a small queue on the
+scan), deduplicates by MAC keeping, for each network, the sighting that places it
+best (strong signal and precise fix), and writes a Wigle file. If the phone cannot be reached, the scans wait in a small queue on the
 T-Embed's SD card and are delivered as soon as it answers again.
 
 ## Components

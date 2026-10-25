@@ -55,9 +55,15 @@ Wi-Fi in a loop.
    deduplicates by MAC and writes the Wigle file (`WigleWifi-1.6`, the same
    the stock Bruce module writes, one file per run named after the run's
    first fix, ready for wigle.net). Because the dedup is on the phone, there
-   is no cap on tracked MACs, and for every MAC it keeps the sighting with the
-   strongest RSSI - the one taken closest to the access point - instead of
-   the first one.
+   is no cap on tracked MACs, and for every MAC it keeps the sighting that
+   places the access point best instead of the first one. "Best" is the
+   lowest combined uncertainty, `hypot(GPS accuracy, distance from RSSI)`,
+   with the distance from a rough log-distance path-loss model (-40 dBm at
+   1 m, exponent 3). A closer sighting and a more precise fix both win, and
+   neither does when it comes with a much worse value of the other (a
+   -40 dBm sighting under a 200 m fix does not replace a -65 dBm one under a
+   5 m fix). It is a heuristic to rank two sightings, not a range
+   measurement.
 6. **The T-Embed sends durations, never timestamps.** It has no clock
    comparable to the phone's (`now()` is millis since boot), so a scan
    carries `ago`, how long before the request it happened (half of the scan

@@ -24,8 +24,8 @@ Location.
 - Every fix goes into `FixHistory` (about two hours), so a scan can be placed
   at the moment it happened, not at the moment it was delivered.
 - `POST /scan?run=ID&ago=MS` on port 8080 takes a scan from the T-Embed,
-  looks the position up at `now - ago`, deduplicates by MAC (strongest RSSI
-  wins) and `RunStore` writes the run as a Wigle file under the app's private
+  looks the position up at `now - ago`, deduplicates by MAC (the sighting
+  with the lowest combined GPS-accuracy and signal-distance uncertainty wins) and `RunStore` writes the run as a Wigle file under the app's private
   `files/runs/`. Answers `ok,added,improved,total`, or 503 when no fix is
   close enough to the scan time.
 - `GET /gps` returns the last fix as `lat,lon,acc,ts,age_ms,alt`; kept for
